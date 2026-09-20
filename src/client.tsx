@@ -1,5 +1,6 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import type { BetterSidebarService, TabComponentProps } from "dsh-better-sidebar/client/service"
+import { createSidebarReveal } from "./sidebar-reveal.js"
 
 export const inject = ["slots", "sessions", "workspaces"] as const
 const TAB = "dsh-decision-room:workbench"
@@ -91,10 +92,12 @@ function Launcher({
 }
 export function apply(ctx: ClientContext): void {
   let sidebar: BetterSidebarService | undefined
+  const reveal = createSidebarReveal()
   const dialogs = new Set<HTMLDialogElement>()
   let disposed = false
   ctx.effect(() => () => {
     disposed = true
+    reveal.dispose()
     for (const dialog of dialogs) {
       dialog.remove()
     }
@@ -113,6 +116,9 @@ export function apply(ctx: ClientContext): void {
         single: true,
         hidden: true,
         component: (props: TabComponentProps) => {
+          const { sessionId } = props.scope
+          const { store, tab } = props
+          useEffect(() => reveal.attach(sessionId, { store, tabId: tab.id }), [sessionId, store, tab.id])
           try {
             const workspace = workspaceFor(ctx, props.scope.sessionId)
             return (
@@ -152,6 +158,7 @@ export function apply(ctx: ClientContext): void {
     }
     if (sidebar && sidebar.isTabEnabled(TAB)) {
       sidebar.openTab({ type: TAB }, { sessionId: target })
+      reveal.request(target)
       return
     }
     // Native dialog is an in-DSH fallback when Better Sidebar is not installed. Closing it never stops the Host job.

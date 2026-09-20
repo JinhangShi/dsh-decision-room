@@ -146,7 +146,7 @@ export function apply(ctx: HostContext): void {
       content: readFileSync(new URL("SKILL.md", directory), "utf8").replace(/^---[\s\S]*?---\s*/, ""),
       source: "bundled",
       resourceBase: { kind: "directory", path: fileURLToPath(directory) },
-      metadata: { version: "0.1.0", author: "QCC" },
+      metadata: { version: "0.1.1", author: "QCC" },
     }),
   )
 }

@@ -74,7 +74,7 @@ pnpm pack --pack-destination dist
 完整停止你准备安装的 DSH Profile，然后执行：
 
 ```sh
-dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/dsh-decision-room-0.1.0.tgz
+dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/dsh-decision-room-0.1.1.tgz
 ```
 
 启动 DSH 的进程需要同一份 Host 环境配置，插件不会读取浏览器存储中的密钥：
