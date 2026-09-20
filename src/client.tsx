@@ -1,15 +1,22 @@
 import { useEffect, useState } from "react"
 import type { BetterSidebarService, TabComponentProps } from "dsh-better-sidebar/client/service"
 import { createSidebarReveal } from "./sidebar-reveal.js"
+import { DecisionChatMessage, decisionNodeDefinition, type ConversationEvents } from "./chat-messages.js"
 
-export const inject = ["slots", "sessions", "workspaces"] as const
+export const inject = ["slots", "sessions", "workspaces", "conversationEvents"] as const
 const TAB = "dsh-decision-room:workbench"
 type Workspace = { workspaceId: string; path?: string; sessionIds?: string[] }
 export type ClientContext = {
   slots: {
     inject(name: string, setup: () => void | (() => void)): unknown
     register<Props extends object>(
-      descriptor: { name: string; id: string; order?: number; inject?: (sessionId: string) => Record<string, unknown> },
+      descriptor: {
+        name: string
+        id: string
+        key?: string
+        order?: number
+        inject?: (sessionId: string) => Record<string, unknown>
+      },
       component: (props: Props) => JSX.Element | null,
     ): () => void
   }
@@ -20,6 +27,7 @@ export type ClientContext = {
   }
   workspaces: { list: { getSnapshot(): { items?: Workspace[]; recentWorkspaceId?: string } } }
   betterSidebar?: BetterSidebarService
+  conversationEvents: ConversationEvents
   inject(deps: string[], setup: (context: ClientContext) => void): unknown
   effect(setup: () => void | (() => void)): unknown
 }
@@ -34,7 +42,7 @@ function workspaceFor(ctx: ClientContext, sessionId?: string): Workspace {
   return workspace
 }
 function workbenchUrl(sessionId: string, workspace: Workspace): string {
-  return `/decision-room/?${new URLSearchParams({ sessionId, workspaceId: workspace.path! })}`
+  return `/decision-room/?${new URLSearchParams({ sessionId, workspaceId: workspace.path!, layout: "sidebar" })}`
 }
 function Launcher({
   launch,
@@ -91,6 +99,13 @@ function Launcher({
   )
 }
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => ctx.conversationEvents.register(decisionNodeDefinition))
+  ctx.slots.inject("conversation.chat.node", () =>
+    ctx.slots.register(
+      { name: "conversation.chat.node", id: "decision-room:message", key: "decision-room" },
+      DecisionChatMessage,
+    ),
+  )
   let sidebar: BetterSidebarService | undefined
   const reveal = createSidebarReveal()
   const dialogs = new Set<HTMLDialogElement>()

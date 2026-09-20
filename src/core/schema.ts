@@ -169,6 +169,8 @@ export const usageSchema = z.object({
 export type Usage = z.infer<typeof usageSchema>
 export const callSchema = z.object({
   id,
+  purpose: z.enum(["review", "compaction"]).optional(),
+  contextSessionId: z.string().optional(),
   key: z.string(),
   phase: phaseSchema,
   round: z.number(),

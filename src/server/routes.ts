@@ -98,6 +98,7 @@ export function createRoutes(
           token,
           models: publicModels(engine.models),
           mode: engine.mode,
+          contextOwner: engine.contextOwner,
           defaults: defaultConfiguration(engine.models),
         })
       }

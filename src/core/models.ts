@@ -28,8 +28,8 @@ export const modelSchema = z
         ctx.addIssue({ code: "custom", message: `extraBody 不允许字段 ${key}` })
       }
     }
-    if (model.transport === "dsh" && !model.provider) {
-      ctx.addIssue({ code: "custom", message: "DSH 模型需要 provider" })
+    if (model.transport === "dsh" && (!model.provider || model.provider === "dsh-decision-room")) {
+      ctx.addIssue({ code: "custom", message: "DSH 模型需要已配置的上游 provider，不能指向决策室自身" })
     }
   })
 export type Model = z.infer<typeof modelSchema>

@@ -1,7 +1,13 @@
 import type { Model } from "../core/models.js"
 import type { RunConfig, Scope } from "../core/schema.js"
 
-export type Bootstrap = { token: string; models: Model[]; mode: "live" | "demo"; defaults: RunConfig }
+export type Bootstrap = {
+  token: string
+  models: Model[]
+  mode: "live" | "demo"
+  defaults: RunConfig
+  contextOwner?: "dsh" | "standalone"
+}
 export class Api {
   token = ""
   constructor(readonly scope: Scope) {}

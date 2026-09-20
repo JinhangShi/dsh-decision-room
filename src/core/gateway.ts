@@ -1,5 +1,21 @@
 import type { Model } from "./models.js"
-import { DecisionError, type Usage } from "./schema.js"
+import { DecisionError, type Phase, type Run, type Usage } from "./schema.js"
+
+export type WireMessage = { role: "user" | "assistant"; content: string }
+export type ContextDispatch = {
+  purpose: "review" | "compaction"
+  inputTokens: number
+  outputTokens: number
+  hash: string
+  sessionId: string
+}
+export type ReviewContext = {
+  run: Run
+  phase: Phase
+  seatId: string
+  authorize(dispatch: ContextDispatch): Promise<string>
+  receipt(id: string, response: ModelResponse | undefined, error?: string): Promise<void>
+}
 
 export type ModelRequest = {
   model: Model
@@ -7,10 +23,16 @@ export type ModelRequest = {
   prompt: string
   maxOutputTokens: number
   signal: AbortSignal
+  messages?: WireMessage[]
+  headers?: Record<string, string>
+  context?: ReviewContext
 }
 export type ModelResponse = { text: string; returnedModel?: string; usage?: Usage }
 export interface ModelGateway {
+  readonly managedContext?: boolean
+  estimate?(system: string, prompt: string, output: number): number
   generate(request: ModelRequest): Promise<ModelResponse>
+  dispose?(): Promise<void>
 }
 type JsonObject = Record<string, unknown>
 function object(value: unknown): JsonObject {
@@ -78,7 +100,12 @@ export class HttpGateway implements ModelGateway {
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
       throw new DecisionError("ENDPOINT", "模型网关必须使用不含凭据、查询参数和片段的 HTTPS 地址")
     }
-    const headers: Record<string, string> = { "content-type": "application/json", authorization: `Bearer ${key}` }
+    const headers: Record<string, string> = {
+      ...request.headers,
+      "content-type": "application/json",
+      authorization: `Bearer ${key}`,
+    }
+    const messages = request.messages ?? [{ role: "user" as const, content: prompt }]
     let body: JsonObject
     if (model.transport === "messages") {
       headers["anthropic-version"] = "2023-06-01"
@@ -88,7 +115,7 @@ export class HttpGateway implements ModelGateway {
         ...model.extraBody,
         model: model.model,
         system,
-        messages: [{ role: "user", content: prompt }],
+        messages,
         max_tokens: maxOutputTokens,
       }
     } else if (model.transport === "responses") {
@@ -96,7 +123,7 @@ export class HttpGateway implements ModelGateway {
         ...model.extraBody,
         model: model.model,
         instructions: system,
-        input: prompt,
+        input: request.messages ?? prompt,
         max_output_tokens: maxOutputTokens,
         store: false,
       }
@@ -104,10 +131,7 @@ export class HttpGateway implements ModelGateway {
       body = {
         ...model.extraBody,
         model: model.model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: prompt },
-        ],
+        messages: [{ role: "system", content: system }, ...messages],
         stream: false,
         [model.outputParameter]: maxOutputTokens,
       }
@@ -207,9 +231,9 @@ export type DshLlm = {
     system: string
     messages: Array<{
       id: string
-      role: "user"
+      role: "user" | "assistant"
       content: Array<{ type: "text"; text: string }>
-      source: { kind: "user" }
+      source: { kind: "plugin"; plugin: string }
     }>
     maxTokens: number
     signal: AbortSignal
@@ -225,14 +249,12 @@ export class DshGateway implements ModelGateway {
       provider: request.model.provider ?? "",
       model: request.model.model,
       system: request.system,
-      messages: [
-        {
-          id: crypto.randomUUID(),
-          role: "user",
-          content: [{ type: "text", text: request.prompt }],
-          source: { kind: "user" },
-        },
-      ],
+      messages: (request.messages ?? [{ role: "user" as const, content: request.prompt }]).map(message => ({
+        id: crypto.randomUUID(),
+        role: message.role,
+        content: [{ type: "text" as const, text: message.content }],
+        source: { kind: "plugin" as const, plugin: "dsh-decision-room" },
+      })),
       maxTokens: request.maxOutputTokens,
       signal: request.signal,
     })) {

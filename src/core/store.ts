@@ -77,9 +77,23 @@ export class FilePersistence implements Persistence {
 
 /** Serializes a complete durable update before exposing it to another caller. */
 export class RunStore {
+  private listeners = new Set<(run: Run) => void>()
   private records = new Map<string, Run>()
   private tails = new Map<string, Promise<unknown>>()
   constructor(private persistence: Persistence) {}
+  subscribe(listener: (run: Run) => void): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+  private notify(run: Run): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(structuredClone(run))
+      } catch {
+        /* Presentation cannot roll back durable business state. */
+      }
+    }
+  }
   async initialize(): Promise<void> {
     for (const record of await this.persistence.load()) {
       this.records.set(record.id, runSchema.parse(record))
@@ -103,6 +117,7 @@ export class RunStore {
       const record = runSchema.parse(run)
       await this.persistence.save(record)
       this.records.set(record.id, record)
+      this.notify(record)
       return structuredClone(record)
     })
   }
@@ -118,6 +133,7 @@ export class RunStore {
       const valid = runSchema.parse(draft)
       await this.persistence.save(valid)
       this.records.set(id, valid)
+      this.notify(valid)
       return structuredClone(valid)
     })
   }

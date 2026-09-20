@@ -16,7 +16,10 @@
 - 完整修订方案、逐项修改映射、独立复核、试点验证计划、Host 自动附加的未解决异议。
 - 人工采纳／不采纳／暂缓，绑定确切报告版本；补充反馈后创建新版本，旧记录保持不变。
 - Markdown/TXT 方案及补充材料、Markdown/安全 HTML 导出、当前会话历史。
-- DSH 左侧入口、当前原生会话中的工作台入口和两个原生工具。兼容 Better Sidebar；缺失时使用 DSH 页面内的原生对话框。
+- DSH 主聊天显示角色评审、交叉回应、修订稿与复核；按版本留存，刷新和重启不会重复发布。
+- 侧栏负责初始材料、角色与预算配置、进度及任务控制，不再承载讨论全文。
+- 各角色使用独立的 DSH 原生会话，由 DSH 管理历史、Token 估算及自动压缩；首评完成前互相不可见。
+- DSH 左侧入口、当前会话侧栏入口和三个原生工具。兼容 Better Sidebar；缺失时使用 DSH 页面内的原生对话框。
 
 ## 已有模型与边界
 
@@ -74,7 +77,7 @@ pnpm pack --pack-destination dist
 完整停止你准备安装的 DSH Profile，然后执行：
 
 ```sh
-dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/dsh-decision-room-0.1.1.tgz
+dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/dsh-decision-room-0.2.0.tgz
 ```
 
 启动 DSH 的进程需要同一份 Host 环境配置，插件不会读取浏览器存储中的密钥：
@@ -86,6 +89,8 @@ DSH_DECISION_ENV_FILE=/Users/qcc/WebstormProjects/mcp_web/apps/web/.env.dev dsh 
 通过 **localhost / 127.0.0.1** 打开 DSH。点击左侧“决策室”创建专属 Session；也可以在任一已有会话输入区点击“打开决策室”，处理该会话的草稿与报告。
 
 自然语言入口：告诉当前会话你的决策问题、目标、边界和方案，Agent 可通过 bundled `decision-room` Skill 调用 `decision_room_prepare` 保存草稿。之后在工作台核对模型和预算并开始。`decision_room_status` 只能读取当前会话的结果，不会增加预算或发起模型请求。
+
+在主聊天补充反馈后，Agent 可调用 `decision_room_continue` 创建下一版草稿。在侧栏刷新版本，核对后开始；反馈不会改写旧结论或自动扩大预算。
 
 关闭工作台仅关闭视图。需要停止任务时使用任务的“暂停讨论”或“取消任务”；**DSH 原生聊天停止按钮不等同于停止决策室的 Host 任务**。
 
@@ -101,7 +106,9 @@ DSH_DECISION_MODELS_FILE=/absolute/path/to/models.local.json
 
 模型价格默认为 `null`。拿到实际 API 计价后，填写人民币／百万 Token 的 `inputCnyPerMillion` 和 `outputCnyPerMillion`，才能启用金额预算。缓存按输入价保守计算；这不是供应商结算账单。
 
-预算先按 UTF-8 字节数加开销及输出上限保守预留，收到完整 usage 后结算。超时、取消、网络中断、缺少 usage 的调用保留预留额度，显示“待对账”。上游推理 Token、计费语义和取消行为不能由插件保证；发现实际报告用量超过总额度会停止后续请求。没有配置价格时，使用 Token、调用次数和时间限制，不把费用显示为零。
+DSH 中按宿主 Token Meter 估算，并在发送请求前按实际原生上下文和输出上限持久化预算预留，收到 usage 后结算。压缩请求单独计入调用次数、Token、金额及时间边界。独立开发预览仍使用 UTF-8 字节数保守估算，不能代表原生压缩能力。
+
+超时、取消、网络中断、缺少 usage 的调用保留预留额度，显示“待对账”。上游推理 Token、计费语义和取消行为不能由插件保证；发现实际报告用量超过总额度会停止后续请求。没有配置价格时，使用 Token、调用次数和时间限制，不把费用显示为零。
 
 每个逻辑步骤最多尝试三次，失败会暂停，用户点击继续才重试。重试消耗独立预算，不覆盖之前失败或中断的调用记录。修改模型配置后应创建新版本，已有任务不会静默使用变更后的模型定义。
 
@@ -120,7 +127,9 @@ pnpm typecheck    # 交付前最后一步
 
 ## 存储、安全与适用范围
 
-- DSH 中由当前 Profile 的 `decision_room_v1` Storage Domain 持久化；开发预览使用 `.decision-room/{demo,live}/runs.json`。
+- DSH 中由 `decision_room_v1` Storage Domain 保存任务、预算和问题账本；角色历史和主聊天消息使用 DSH 原生 Session 持久化。开发预览使用 `.decision-room/{demo,live}/runs.json`。
+- 升级会把旧任务已公开的评审同步到原会话主聊天，并保留成功检查点；重启不会自行继续付费任务。
+- 自动压缩不意味着无限容量。单份输入本身过大、压缩失败或预算不足仍会暂停并保留结果，不会静默截掉硬约束。
 - Host 更新串行写入并先持久化再发布；开发文件存储以临时文件原子替换。损坏记录导致启动失败，不清空旧数据，不回退到无持久化模式。
 - 重启将运行中任务恢复为暂停，不自动产生新的付费请求。保留成功检查点、问题 ID、版本、事件与用量。
 - HTTP 路由同时检查本机 socket、Host、同源 Origin／Fetch Metadata；所有任务 API 还要求随机访问凭证，存放浏览器内存，不放 URL。它是可信本地 Profile 的防跨站边界，**不是多人租户认证**。

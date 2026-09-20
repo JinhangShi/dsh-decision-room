@@ -114,15 +114,24 @@ describe("模型协议与身份检查", () => {
     }
   })
   it("DSH 原生流读取可见文本和 usage，不把推理或未知身份当作证明", async () => {
+    const history = [
+      { role: "user" as const, content: "原始方案" },
+      { role: "assistant" as const, content: "上一轮评审" },
+      { role: "user" as const, content: "交叉回应任务" },
+    ]
     const gateway = new DshGateway({
-      async *stream() {
+      async *stream(options) {
+        expect(options.messages.map(message => ({ role: message.role, content: message.content[0]?.text }))).toEqual(
+          history,
+        )
+        expect(options.messages.every(message => message.source.kind === "plugin")).toBe(true)
         yield { type: "reasoning-delta", text: "不应返回的推理" }
         yield { type: "text-delta", text: "{}" }
         yield { type: "usage", usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 4 } }
         yield { type: "finish", reason: { kind: "stop" } }
       },
     })
-    const response = await gateway.generate(request())
+    const response = await gateway.generate({ ...request(), messages: history })
     expect(response).toEqual({ text: "{}", usage: { inputTokens: 14, outputTokens: 20, totalTokens: 34 } })
   })
   it("Messages 输入计费包含缓存读取和缓存写入，避免低估已报告用量", async () => {

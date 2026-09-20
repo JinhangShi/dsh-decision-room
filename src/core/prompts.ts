@@ -62,9 +62,13 @@ export function makePrompt(run: Run, phase: Phase, seatId: string): string {
   const shared = {
     ...base,
     issues: run.issues,
+    // Issue details already exist in the ledger. Preserve the distinct first-pass conclusions without duplicating every issue.
     reviews: run.calls
-      .filter(call => call.phase === "independent" && call.status === "succeeded")
-      .map((call, index) => ({ reviewer: `评审员 ${index + 1}`, result: call.result })),
+      .filter(call => call.purpose !== "compaction" && call.phase === "independent" && call.status === "succeeded")
+      .map((call, index) => {
+        const review = reviewSchema.parse(call.result)
+        return { reviewer: `评审员 ${index + 1}`, summary: review.summary, strengths: review.strengths }
+      }),
   }
   if (phase === "organize") {
     return JSON.stringify({
@@ -77,15 +81,24 @@ export function makePrompt(run: Run, phase: Phase, seatId: string): string {
     .filter(
       call =>
         call.phase === "discuss" &&
+        call.purpose !== "compaction" &&
         call.round <= latestRound &&
         call.round >= latestRound - 1 &&
         call.status === "succeeded",
     )
     .map((call, index) => ({ reviewer: `评审员 ${index + 1}`, round: call.round, result: call.result }))
   if (phase === "discuss") {
+    const assigned = new Set(assignedIssues(run, seatId))
     return JSON.stringify({
       ...shared,
-      recentDiscussion: discussion,
+      issues: run.issues.filter(issue => assigned.has(issue.id)),
+      recentDiscussion: discussion.map(item => ({
+        ...item,
+        result: {
+          ...debateSchema.parse(item.result),
+          responses: debateSchema.parse(item.result).responses.filter(response => assigned.has(response.issueId)),
+        },
+      })),
       role: run.config.seats.find(seat => seat.id === seatId),
       assignedIssueIds: assignedIssues(run, seatId),
       task: "仅回应 assignedIssueIds，每个 ID 恰好一项。说明立场是否变化及新依据。没有新证据就明确缺口，不用重复发言制造共识。只有进一步讨论仍可能产生实质新信息才设置 continueDiscussion=true。",

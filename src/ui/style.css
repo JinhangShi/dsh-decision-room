@@ -1063,3 +1063,36 @@ details summary {
     animation: none;
   }
 }
+
+.sidebar-mode .history {
+  display: none;
+}
+.sidebar-mode .app-layout {
+  display: block;
+}
+.sidebar-mode .main-content {
+  padding: 16px;
+}
+.sidebar-mode .app-header {
+  padding: 14px 16px;
+}
+.sidebar-mode .app-header small,
+.sidebar-mode .local-dot {
+  display: none;
+}
+.sidebar-mode .metric-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.sidebar-mode .phase-track {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.sidebar-mode .member {
+  justify-content: space-between;
+  gap: 12px;
+}
+.sidebar-mode .run-actions {
+  gap: 8px;
+}
+.sidebar-mode .run-heading h1 {
+  font-size: 21px;
+}

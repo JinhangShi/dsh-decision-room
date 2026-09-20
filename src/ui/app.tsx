@@ -515,7 +515,7 @@ function ResultContent({ call }: { call: Call }): JSX.Element | null {
   )
 }
 
-export function App({ scope }: { scope: Scope }): JSX.Element {
+export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolean }): JSX.Element {
   const api = useMemo(() => new Api(scope), [scope.sessionId, scope.workspaceId])
   const [boot, setBoot] = useState<Bootstrap>()
   const [runs, setRuns] = useState<Run[]>([])
@@ -626,7 +626,7 @@ export function App({ scope }: { scope: Scope }): JSX.Element {
   const unresolved = run?.issues.filter(issue => issue.status !== "addressed").length ?? 0
   const phaseIndex = run ? PHASES.indexOf(run.phase) : -1
   return (
-    <div className="decision-app">
+    <div className={`decision-app ${sidebar ? "sidebar-mode" : ""}`}>
       <header className="app-header">
         <a
           href="#"
@@ -694,6 +694,45 @@ export function App({ scope }: { scope: Scope }): JSX.Element {
           </div>
         </aside>
         <main className="main-content">
+          {sidebar && (
+            <>
+              <div className="notice">评审发言、争议和修订方案显示在 DSH 主聊天。这里用于配置与进度控制。</div>
+              {runs.length > 0 && (
+                <div className="run-actions">
+                  <label className="field">
+                    <span>决策版本</span>
+                    <select
+                      aria-label="决策版本"
+                      value={run?.id ?? ""}
+                      onChange={event => {
+                        const selected = runs.find(item => item.id === event.target.value)
+                        if (selected) {
+                          void perform(() => selectRun(selected))
+                        }
+                      }}
+                    >
+                      <option value="" disabled>
+                        选择版本
+                      </option>
+                      {runs.map(item => (
+                        <option key={item.id} value={item.id}>
+                          V{item.version} · {item.brief.title} · {STATUS[item.status]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className="secondary"
+                    onClick={() => {
+                      void perform(refreshList)
+                    }}
+                  >
+                    刷新版本
+                  </button>
+                </div>
+              )}
+            </>
+          )}
           {error && (
             <div role="alert" className="notice error">
               {error}
@@ -905,286 +944,366 @@ export function App({ scope }: { scope: Scope }): JSX.Element {
                   </button>
                 </section>
               )}
-              <div className="tabs" role="tablist">
-                {(
-                  [
-                    ["discussion", "评审聊天室"],
-                    ["issues", `问题台账 · ${run.issues.length}`],
-                    ["report", "修订方案"],
-                    ["record", "材料与记录"],
-                  ] as const
-                ).map(([key, label]) => (
-                  <button
-                    role="tab"
-                    aria-selected={view === key}
-                    className={view === key ? "selected" : ""}
-                    key={key}
-                    onClick={() => setView(key)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {view === "discussion" && (
-                <div className="discussion-layout">
-                  <section className="conversation">
-                    <div className="conversation-note">
-                      <span className="small-mark">◈</span>
-                      <p>
-                        {run.phase === "independent"
-                          ? "独立评审进行中。每个角色只看到相同材料，全部提交后统一揭示。"
-                          : "按问题讨论，保留来源和异议。发言数量与赞同人数不代表结论更正确。"}
-                      </p>
-                    </div>
-                    {run.calls.length === 0 && (
-                      <div className="empty-state">
-                        <h3>成员已就座</h3>
-                        <p>开始后，将从各自专业视角独立评审。</p>
-                      </div>
-                    )}
-                    {run.calls.map(call => (
-                      <article className="message" key={call.id}>
-                        <div
-                          className={`avatar color-${Math.max(
-                            0,
-                            run.config.seats.findIndex(seat => seat.id === call.seatId),
-                          )}`}
-                        >
-                          {call.seatId === "moderator" || call.seatId === "editor"
-                            ? "编"
-                            : call.seatId === "verifier"
-                              ? "核"
-                              : run.config.seats.find(seat => seat.id === call.seatId)?.name.slice(0, 1)}
-                        </div>
-                        <div className="message-body">
-                          <div className="message-heading">
-                            <strong>
-                              {run.config.seats.find(seat => seat.id === call.seatId)?.name ??
-                                (call.seatId === "verifier" ? "独立复核" : "主持与编辑")}
-                            </strong>
-                            <span>{boot.models.find(model => model.key === call.modelKey)?.label}</span>
-                            <small>
-                              {PHASE_LABEL[call.phase]}
-                              {call.round > 0 ? ` · 第 ${call.round} 轮` : ""}
-                            </small>
-                            <span className={`badge ${call.status === "succeeded" ? "good" : "neutral"}`}>
-                              {
-                                { running: "思考中", succeeded: "已提交", failed: "失败", interrupted: "中断" }[
-                                  call.status
-                                ]
-                              }
-                            </span>
-                          </div>
-                          <ResultContent call={call} />
-                          {call.returnedModel && (
-                            <div className="receipt">
-                              网关返回：{call.returnedModel}
-                              {call.usage ? ` · ${call.usage.totalTokens.toLocaleString()} Token` : " · 用量未报告"}
-                            </div>
-                          )}
-                        </div>
-                      </article>
-                    ))}
-                  </section>
-                  <aside className="members-panel">
-                    <div className="sidebar-label">本轮评审成员</div>
-                    {run.config.seats.map((seat, index) => (
+              {sidebar ? (
+                <section className="panel">
+                  <h3>评审成员进度</h3>
+                  <p className="hint">上下文由 DSH 会话管理；压缩调用同样受本轮预算限制。</p>
+                  {run.config.seats.map(seat => {
+                    const calls = run.calls.filter(call => call.seatId === seat.id && call.purpose !== "compaction")
+                    const last = calls.at(-1)
+                    return (
                       <div className="member" key={seat.id}>
-                        <div className={`avatar color-${index}`}>{index + 1}</div>
                         <div>
                           <strong>{seat.name}</strong>
                           <small>{boot.models.find(model => model.key === seat.modelKey)?.label}</small>
                         </div>
-                      </div>
-                    ))}
-                    <div className="method-card">
-                      <strong>允许不一致</strong>
-                      <p>保留反对意见，比强行达成共识更有用。</p>
-                      <strong>没有证据时停下来</strong>
-                      <p>把未知变成下一步验证任务，而不是继续重复讨论。</p>
-                    </div>
-                  </aside>
-                </div>
-              )}
-              {view === "issues" && (
-                <section className="issue-list">
-                  <div className="section-heading">
-                    <div>
-                      <h2>需要被回应的问题</h2>
-                      <p>{unresolved} 项仍未解决或待补证。事实争议不会因为模型赞同就变成已证实。</p>
-                    </div>
-                  </div>
-                  {run.issues.length === 0 && <div className="empty-state">首轮独立评审完成后，在这里汇总问题。</div>}
-                  {run.issues.map(issue => (
-                    <article className="issue-card" key={issue.id}>
-                      <div className="inline-between">
-                        <span className="issue-ref">{issue.id}</span>
-                        <span className={`badge ${issue.status === "addressed" ? "good" : "warning"}`}>
-                          {{ open: "未解决", addressed: "设计已回应", needs_evidence: "待补证" }[issue.status]}
+                        <span className="badge neutral">
+                          {last
+                            ? { running: "评审中", succeeded: "已提交", failed: "需处理", interrupted: "已中断" }[
+                                last.status
+                              ]
+                            : "等待开始"}
                         </span>
                       </div>
-                      <h3>{issue.title}</h3>
-                      <p>{issue.rationale}</p>
-                      <dl>
-                        <dt>建议修改</dt>
-                        <dd>{issue.suggestedChange}</dd>
-                        <dt>改变意见的条件</dt>
-                        <dd>{issue.whatWouldChangeMind}</dd>
-                        <dt>材料引用</dt>
-                        <dd>{issue.evidenceIds.join("、") || "无，待验证判断"}</dd>
-                        {issue.resolution && (
-                          <>
-                            <dt>复核意见</dt>
-                            <dd>{issue.resolution}</dd>
-                          </>
-                        )}
-                      </dl>
-                    </article>
-                  ))}
-                </section>
-              )}
-              {view === "report" && (
-                <section className="report-panel">
-                  {!run.revisionResult ? (
-                    <div className="empty-state">
-                      <span className="large-mark">◇</span>
-                      <h2>完整修订稿会在这里生成</h2>
-                      <p>讨论结束后，由编辑模型整合修改，再由独立上下文复核。</p>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="report-summary">
-                        <span className="eyebrow">决策摘要</span>
-                        <h2>
-                          {
-                            { pilot: "建议有限试点", need_evidence: "需要补充证据", hold: "建议暂缓" }[
-                              run.revisionResult.recommendation
-                            ]
-                          }
-                        </h2>
-                        <p>{run.revisionResult.summary}</p>
-                        <span className="badge warning">
-                          {unresolved} 项未闭环 · {run.verification ? "已完成模型复核" : "等待复核"}
-                        </span>
-                      </div>
-                      {run.verification?.constraintViolations.map((violation, index) => (
-                        <div className="notice error" key={index}>
-                          复核发现约束问题：{violation}
-                        </div>
-                      ))}
-                      <h3>修改后的完整方案</h3>
-                      <pre className="plan-text">{run.revisionResult.fullPlan}</pre>
-                      <h3>修改对照</h3>
-                      {run.revisionResult.changes.map(change => (
-                        <div className="change-row" key={change.issueId}>
-                          <span className="issue-ref">{change.issueId}</span>
-                          <span className="badge neutral">
-                            {{ accepted: "采纳", partial: "部分采纳", rejected: "未采纳" }[change.disposition]}
-                          </span>
-                          <p>{change.change}</p>
-                          <p className="hint">{change.reason}</p>
-                        </div>
-                      ))}
-                      <h3>验证与试点</h3>
-                      {run.revisionResult.experiments.map((experiment, index) => (
-                        <div className="issue-card" key={index}>
-                          <strong>{experiment.hypothesis}</strong>
-                          <p>{experiment.method}</p>
-                          <p>
-                            指标：{experiment.metric} · 责任角色：{experiment.ownerRole}
-                          </p>
-                          <p className="hint">停止条件：{experiment.stopCondition}</p>
-                        </div>
-                      ))}
-                      <div className="notice">
-                        {run.verification?.summary ?? "尚未完成独立复核"}。异议台账仍是报告的一部分。
-                      </div>
-                      {run.status === "completed" && (
-                        <div className="human-decision">
-                          <h3>由你作出最后取舍</h3>
-                          {run.humanDecision ? (
-                            <p>
-                              已记录：
-                              {
-                                { adopt: "采纳", reject: "不采纳", defer: "暂缓决策" }[run.humanDecision.decision]
-                              } · {run.humanDecision.reason}
-                            </p>
-                          ) : (
-                            <>
-                              <label className="field">
-                                <span>决定依据与接受的风险</span>
-                                <textarea
-                                  rows={3}
-                                  value={decisionReason}
-                                  onChange={event => setDecisionReason(event.target.value)}
-                                  placeholder="人工取舍会绑定此报告版本，原风险不会被抹去。"
-                                />
-                              </label>
-                              <div className="run-actions">
-                                {(
-                                  [
-                                    ["adopt", "采纳方案"],
-                                    ["defer", "暂缓决策"],
-                                    ["reject", "不采纳"],
-                                  ] as const
-                                ).map(([decision, label]) => (
-                                  <button
-                                    className={decision === "adopt" ? "primary" : "secondary"}
-                                    key={decision}
-                                    disabled={busy || !decisionReason.trim()}
-                                    onClick={() => {
-                                      void perform(async () =>
-                                        setRun(
-                                          await api.request<Run>(`/runs/${run.id}/decision`, "POST", {
-                                            scope,
-                                            revision: run.revision,
-                                            decision,
-                                            reason: decisionReason,
-                                          }),
-                                        ),
-                                      )
-                                    }}
-                                  >
-                                    {label}
-                                  </button>
-                                ))}
-                              </div>
-                            </>
-                          )}
-                        </div>
+                    )
+                  })}
+                  <p>{unresolved} 项问题尚未解决或待补证。完整内容请看主聊天。</p>
+                  <p className="hint">可以直接在主聊天提出反馈，生成下一版草稿；核对后在这里开始。</p>
+                  {run.status === "completed" && (
+                    <div className="human-decision">
+                      <h3>人工取舍</h3>
+                      {run.humanDecision ? (
+                        <p>已记录：{run.humanDecision.reason}</p>
+                      ) : (
+                        <>
+                          <label className="field">
+                            <span>决定依据与接受的风险</span>
+                            <textarea
+                              rows={3}
+                              value={decisionReason}
+                              onChange={event => setDecisionReason(event.target.value)}
+                            />
+                          </label>
+                          <div className="run-actions">
+                            {(
+                              [
+                                ["adopt", "采纳方案"],
+                                ["defer", "暂缓决策"],
+                                ["reject", "不采纳"],
+                              ] as const
+                            ).map(([decision, label]) => (
+                              <button
+                                key={decision}
+                                className="secondary"
+                                disabled={busy || !decisionReason.trim()}
+                                onClick={() => {
+                                  void perform(async () =>
+                                    setRun(
+                                      await api.request<Run>(`/runs/${run.id}/decision`, "POST", {
+                                        scope,
+                                        revision: run.revision,
+                                        decision,
+                                        reason: decisionReason,
+                                      }),
+                                    ),
+                                  )
+                                }}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </>
                       )}
-                    </>
+                    </div>
                   )}
                 </section>
-              )}
-              {view === "record" && (
-                <section className="panel">
-                  <h3>冻结的目标与边界</h3>
-                  <p>{run.brief.objective}</p>
-                  <pre className="plan-text">{run.brief.constraints}</pre>
-                  <details>
-                    <summary>原始方案与补充材料</summary>
-                    <pre className="plan-text">{run.brief.plan}</pre>
-                    {run.brief.sources.map(source => (
-                      <details key={source.id}>
-                        <summary>
-                          {source.title} · {source.id}
-                        </summary>
-                        <pre className="plan-text">{source.text}</pre>
+              ) : (
+                <>
+                  <div className="tabs" role="tablist">
+                    {(
+                      [
+                        ["discussion", "评审聊天室"],
+                        ["issues", `问题台账 · ${run.issues.length}`],
+                        ["report", "修订方案"],
+                        ["record", "材料与记录"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <button
+                        role="tab"
+                        aria-selected={view === key}
+                        className={view === key ? "selected" : ""}
+                        key={key}
+                        onClick={() => setView(key)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {view === "discussion" && (
+                    <div className="discussion-layout">
+                      <section className="conversation">
+                        <div className="conversation-note">
+                          <span className="small-mark">◈</span>
+                          <p>
+                            {run.phase === "independent"
+                              ? "独立评审进行中。每个角色只看到相同材料，全部提交后统一揭示。"
+                              : "按问题讨论，保留来源和异议。发言数量与赞同人数不代表结论更正确。"}
+                          </p>
+                        </div>
+                        {run.calls.length === 0 && (
+                          <div className="empty-state">
+                            <h3>成员已就座</h3>
+                            <p>开始后，将从各自专业视角独立评审。</p>
+                          </div>
+                        )}
+                        {run.calls.map(call => (
+                          <article className="message" key={call.id}>
+                            <div
+                              className={`avatar color-${Math.max(
+                                0,
+                                run.config.seats.findIndex(seat => seat.id === call.seatId),
+                              )}`}
+                            >
+                              {call.seatId === "moderator" || call.seatId === "editor"
+                                ? "编"
+                                : call.seatId === "verifier"
+                                  ? "核"
+                                  : run.config.seats.find(seat => seat.id === call.seatId)?.name.slice(0, 1)}
+                            </div>
+                            <div className="message-body">
+                              <div className="message-heading">
+                                <strong>
+                                  {run.config.seats.find(seat => seat.id === call.seatId)?.name ??
+                                    (call.seatId === "verifier" ? "独立复核" : "主持与编辑")}
+                                </strong>
+                                <span>{boot.models.find(model => model.key === call.modelKey)?.label}</span>
+                                <small>
+                                  {PHASE_LABEL[call.phase]}
+                                  {call.round > 0 ? ` · 第 ${call.round} 轮` : ""}
+                                </small>
+                                <span className={`badge ${call.status === "succeeded" ? "good" : "neutral"}`}>
+                                  {
+                                    { running: "思考中", succeeded: "已提交", failed: "失败", interrupted: "中断" }[
+                                      call.status
+                                    ]
+                                  }
+                                </span>
+                              </div>
+                              <ResultContent call={call} />
+                              {call.returnedModel && (
+                                <div className="receipt">
+                                  网关返回：{call.returnedModel}
+                                  {call.usage ? ` · ${call.usage.totalTokens.toLocaleString()} Token` : " · 用量未报告"}
+                                </div>
+                              )}
+                            </div>
+                          </article>
+                        ))}
+                      </section>
+                      <aside className="members-panel">
+                        <div className="sidebar-label">本轮评审成员</div>
+                        {run.config.seats.map((seat, index) => (
+                          <div className="member" key={seat.id}>
+                            <div className={`avatar color-${index}`}>{index + 1}</div>
+                            <div>
+                              <strong>{seat.name}</strong>
+                              <small>{boot.models.find(model => model.key === seat.modelKey)?.label}</small>
+                            </div>
+                          </div>
+                        ))}
+                        <div className="method-card">
+                          <strong>允许不一致</strong>
+                          <p>保留反对意见，比强行达成共识更有用。</p>
+                          <strong>没有证据时停下来</strong>
+                          <p>把未知变成下一步验证任务，而不是继续重复讨论。</p>
+                        </div>
+                      </aside>
+                    </div>
+                  )}
+                  {view === "issues" && (
+                    <section className="issue-list">
+                      <div className="section-heading">
+                        <div>
+                          <h2>需要被回应的问题</h2>
+                          <p>{unresolved} 项仍未解决或待补证。事实争议不会因为模型赞同就变成已证实。</p>
+                        </div>
+                      </div>
+                      {run.issues.length === 0 && (
+                        <div className="empty-state">首轮独立评审完成后，在这里汇总问题。</div>
+                      )}
+                      {run.issues.map(issue => (
+                        <article className="issue-card" key={issue.id}>
+                          <div className="inline-between">
+                            <span className="issue-ref">{issue.id}</span>
+                            <span className={`badge ${issue.status === "addressed" ? "good" : "warning"}`}>
+                              {{ open: "未解决", addressed: "设计已回应", needs_evidence: "待补证" }[issue.status]}
+                            </span>
+                          </div>
+                          <h3>{issue.title}</h3>
+                          <p>{issue.rationale}</p>
+                          <dl>
+                            <dt>建议修改</dt>
+                            <dd>{issue.suggestedChange}</dd>
+                            <dt>改变意见的条件</dt>
+                            <dd>{issue.whatWouldChangeMind}</dd>
+                            <dt>材料引用</dt>
+                            <dd>{issue.evidenceIds.join("、") || "无，待验证判断"}</dd>
+                            {issue.resolution && (
+                              <>
+                                <dt>复核意见</dt>
+                                <dd>{issue.resolution}</dd>
+                              </>
+                            )}
+                          </dl>
+                        </article>
+                      ))}
+                    </section>
+                  )}
+                  {view === "report" && (
+                    <section className="report-panel">
+                      {!run.revisionResult ? (
+                        <div className="empty-state">
+                          <span className="large-mark">◇</span>
+                          <h2>完整修订稿会在这里生成</h2>
+                          <p>讨论结束后，由编辑模型整合修改，再由独立上下文复核。</p>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="report-summary">
+                            <span className="eyebrow">决策摘要</span>
+                            <h2>
+                              {
+                                { pilot: "建议有限试点", need_evidence: "需要补充证据", hold: "建议暂缓" }[
+                                  run.revisionResult.recommendation
+                                ]
+                              }
+                            </h2>
+                            <p>{run.revisionResult.summary}</p>
+                            <span className="badge warning">
+                              {unresolved} 项未闭环 · {run.verification ? "已完成模型复核" : "等待复核"}
+                            </span>
+                          </div>
+                          {run.verification?.constraintViolations.map((violation, index) => (
+                            <div className="notice error" key={index}>
+                              复核发现约束问题：{violation}
+                            </div>
+                          ))}
+                          <h3>修改后的完整方案</h3>
+                          <pre className="plan-text">{run.revisionResult.fullPlan}</pre>
+                          <h3>修改对照</h3>
+                          {run.revisionResult.changes.map(change => (
+                            <div className="change-row" key={change.issueId}>
+                              <span className="issue-ref">{change.issueId}</span>
+                              <span className="badge neutral">
+                                {{ accepted: "采纳", partial: "部分采纳", rejected: "未采纳" }[change.disposition]}
+                              </span>
+                              <p>{change.change}</p>
+                              <p className="hint">{change.reason}</p>
+                            </div>
+                          ))}
+                          <h3>验证与试点</h3>
+                          {run.revisionResult.experiments.map((experiment, index) => (
+                            <div className="issue-card" key={index}>
+                              <strong>{experiment.hypothesis}</strong>
+                              <p>{experiment.method}</p>
+                              <p>
+                                指标：{experiment.metric} · 责任角色：{experiment.ownerRole}
+                              </p>
+                              <p className="hint">停止条件：{experiment.stopCondition}</p>
+                            </div>
+                          ))}
+                          <div className="notice">
+                            {run.verification?.summary ?? "尚未完成独立复核"}。异议台账仍是报告的一部分。
+                          </div>
+                          {run.status === "completed" && (
+                            <div className="human-decision">
+                              <h3>由你作出最后取舍</h3>
+                              {run.humanDecision ? (
+                                <p>
+                                  已记录：
+                                  {
+                                    { adopt: "采纳", reject: "不采纳", defer: "暂缓决策" }[run.humanDecision.decision]
+                                  } · {run.humanDecision.reason}
+                                </p>
+                              ) : (
+                                <>
+                                  <label className="field">
+                                    <span>决定依据与接受的风险</span>
+                                    <textarea
+                                      rows={3}
+                                      value={decisionReason}
+                                      onChange={event => setDecisionReason(event.target.value)}
+                                      placeholder="人工取舍会绑定此报告版本，原风险不会被抹去。"
+                                    />
+                                  </label>
+                                  <div className="run-actions">
+                                    {(
+                                      [
+                                        ["adopt", "采纳方案"],
+                                        ["defer", "暂缓决策"],
+                                        ["reject", "不采纳"],
+                                      ] as const
+                                    ).map(([decision, label]) => (
+                                      <button
+                                        className={decision === "adopt" ? "primary" : "secondary"}
+                                        key={decision}
+                                        disabled={busy || !decisionReason.trim()}
+                                        onClick={() => {
+                                          void perform(async () =>
+                                            setRun(
+                                              await api.request<Run>(`/runs/${run.id}/decision`, "POST", {
+                                                scope,
+                                                revision: run.revision,
+                                                decision,
+                                                reason: decisionReason,
+                                              }),
+                                            ),
+                                          )
+                                        }}
+                                      >
+                                        {label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </section>
+                  )}
+                  {view === "record" && (
+                    <section className="panel">
+                      <h3>冻结的目标与边界</h3>
+                      <p>{run.brief.objective}</p>
+                      <pre className="plan-text">{run.brief.constraints}</pre>
+                      <details>
+                        <summary>原始方案与补充材料</summary>
+                        <pre className="plan-text">{run.brief.plan}</pre>
+                        {run.brief.sources.map(source => (
+                          <details key={source.id}>
+                            <summary>
+                              {source.title} · {source.id}
+                            </summary>
+                            <pre className="plan-text">{source.text}</pre>
+                          </details>
+                        ))}
                       </details>
-                    ))}
-                  </details>
-                  {run.feedback && <div className="notice">本轮人工反馈：{run.feedback}</div>}
-                  <h3>阶段与操作记录</h3>
-                  <ol className="event-list">
-                    {run.events.map(item => (
-                      <li key={item.id}>
-                        <time>{new Date(item.at).toLocaleTimeString("zh-CN")}</time>
-                        <span>{item.text}</span>
-                      </li>
-                    ))}
-                  </ol>
-                </section>
+                      {run.feedback && <div className="notice">本轮人工反馈：{run.feedback}</div>}
+                      <h3>阶段与操作记录</h3>
+                      <ol className="event-list">
+                        {run.events.map(item => (
+                          <li key={item.id}>
+                            <time>{new Date(item.at).toLocaleTimeString("zh-CN")}</time>
+                            <span>{item.text}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </section>
+                  )}
+                </>
               )}
             </>
           )}

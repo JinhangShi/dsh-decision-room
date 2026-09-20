@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import { activeElapsed, cost, estimateTokens, reserveCheck, settle, spent } from "./budget.js"
-import { GatewayError, type ModelGateway, type ModelResponse } from "./gateway.js"
+import { GatewayError, type ModelGateway, type ModelResponse, type ContextDispatch } from "./gateway.js"
 import { getModel, type Model } from "./models.js"
 import { assignedIssues, makePrompt, parseResult, SYSTEM } from "./prompts.js"
 import {
@@ -64,6 +64,9 @@ export class DecisionEngine {
     private gateway: ModelGateway,
     readonly mode: "live" | "demo" = "live",
   ) {}
+  get contextOwner(): "dsh" | "standalone" {
+    return this.gateway.managedContext ? "dsh" : "standalone"
+  }
 
   async initialize(): Promise<void> {
     await this.store.initialize()
@@ -299,6 +302,7 @@ export class DecisionEngine {
       controller.abort()
     }
     await Promise.allSettled([...this.jobs.values()])
+    await this.gateway.dispose?.()
   }
   private async pauseForError(id: string, epoch: number, reason: string): Promise<void> {
     await this.store.update(id, run => {
@@ -364,7 +368,7 @@ export class DecisionEngine {
   ): Promise<void> {
     const snapshot = this.store.get(id)
     const key = `${phase}:${snapshot.round}:${seatId}`
-    if (snapshot.calls.some(call => call.key === key && call.status === "succeeded")) {
+    if (snapshot.calls.some(call => call.purpose !== "compaction" && call.key === key && call.status === "succeeded")) {
       return
     }
     if (snapshot.status !== "running" || snapshot.epoch !== epoch) {
@@ -372,8 +376,10 @@ export class DecisionEngine {
     }
     const model = getModel(this.models, modelKey)
     const prompt = makePrompt(snapshot, phase, seatId)
-    const tokens = estimateTokens(SYSTEM, prompt, snapshot.config.limits.outputTokens)
-    if (tokens > model.contextTokens) {
+    const tokens =
+      this.gateway.estimate?.(SYSTEM, prompt, snapshot.config.limits.outputTokens) ??
+      estimateTokens(SYSTEM, prompt, snapshot.config.limits.outputTokens)
+    if (!this.gateway.managedContext && tokens > model.contextTokens) {
       throw new DecisionError("CONTEXT", "材料和评审上下文超过所选模型的保守容量，请缩小范围后创建新版本")
     }
     const reservedCost = cost(model, tokens - snapshot.config.limits.outputTokens, snapshot.config.limits.outputTokens)
@@ -421,6 +427,14 @@ export class DecisionEngine {
           prompt,
           maxOutputTokens: snapshot.config.limits.outputTokens,
           signal,
+          context: {
+            run: snapshot,
+            phase,
+            seatId,
+            authorize: dispatch => this.authorizeDispatch(id, epoch, callId, model, dispatch),
+            receipt: (receiptId, value, error) =>
+              this.contextReceipt(id, epoch, callId, receiptId, model, value, error),
+          },
         }),
         signal,
       )
@@ -459,6 +473,87 @@ export class DecisionEngine {
         event(run, "call_failed", `${phase} · ${seatId}：${call.error}`)
       })
       await this.pauseForError(id, epoch, safeError(error))
+    }
+  }
+  private async authorizeDispatch(
+    id: string,
+    epoch: number,
+    primaryId: string,
+    model: Model,
+    dispatch: ContextDispatch,
+  ): Promise<string> {
+    const receiptId = dispatch.purpose === "review" ? primaryId : randomUUID()
+    await this.store.update(id, run => {
+      if (run.status !== "running" || run.epoch !== epoch) {
+        throw new DecisionError("STALE", "任务已停止，未发起上下文请求")
+      }
+      const primary = run.calls.find(call => call.id === primaryId)!
+      const tokens = dispatch.inputTokens + dispatch.outputTokens
+      const cny = cost(model, dispatch.inputTokens, dispatch.outputTokens)
+      const check =
+        dispatch.purpose === "review" ? { ...run, calls: run.calls.filter(call => call.id !== primaryId) } : run
+      reserveCheck(check, tokens, cny)
+      if (dispatch.purpose === "review") {
+        Object.assign(primary, {
+          reservedTokens: tokens,
+          reservedCost: cny,
+          accountedTokens: tokens,
+          accountedCost: cny,
+          promptHash: dispatch.hash,
+          contextSessionId: dispatch.sessionId,
+        })
+      } else {
+        run.calls.push({
+          ...primary,
+          id: receiptId,
+          key: `compaction:${receiptId}`,
+          purpose: "compaction",
+          result: undefined,
+          attempt: 1,
+          status: "running",
+          startedAt: Date.now(),
+          endedAt: undefined,
+          usage: undefined,
+          reservedTokens: tokens,
+          reservedCost: cny,
+          accountedTokens: tokens,
+          accountedCost: cny,
+          accounting: "reserved",
+          promptHash: dispatch.hash,
+          contextSessionId: dispatch.sessionId,
+        })
+        event(run, "context_compaction", `${primary.seatId} 的 DSH 会话正在压缩上下文，调用已预留预算`)
+      }
+    })
+    return receiptId
+  }
+  private async contextReceipt(
+    id: string,
+    epoch: number,
+    primaryId: string,
+    receiptId: string,
+    model: Model,
+    response?: ModelResponse,
+    error?: string,
+  ): Promise<void> {
+    if (receiptId === primaryId) {
+      return
+    }
+    await this.store.update(id, run => {
+      const call = run.calls.find(item => item.id === receiptId)!
+      settle(call, model, response?.usage)
+      call.returnedModel = response?.returnedModel
+      call.status = run.epoch !== epoch || run.status !== "running" ? "interrupted" : error ? "failed" : "succeeded"
+      call.error = error
+      event(run, "context_compacted", error ?? "DSH 上下文压缩完成，原始会话记录保留")
+    })
+    const run = this.store.get(id)
+    const used = spent(run)
+    if (
+      used.tokens > run.config.limits.tokenBudget ||
+      (run.config.limits.maxCostCny !== null && (used.costCny === null || used.costCny > run.config.limits.maxCostCny))
+    ) {
+      await this.pauseForError(id, epoch, "上下文处理用量超过预算，已暂停后续请求")
     }
   }
   private async seats(id: string, epoch: number, phase: Phase, controller: AbortController): Promise<void> {
@@ -501,7 +596,9 @@ export class DecisionEngine {
       if (run.phase === "independent") {
         await this.seats(id, epoch, "independent", controller)
         await this.advance(id, epoch, draft => {
-          const reviews = draft.calls.filter(call => call.phase === "independent" && call.status === "succeeded")
+          const reviews = draft.calls.filter(
+            call => call.purpose !== "compaction" && call.phase === "independent" && call.status === "succeeded",
+          )
           if (reviews.length !== draft.config.seats.length) {
             throw new DecisionError("BARRIER", "独立评审尚未全部提交")
           }
@@ -521,7 +618,9 @@ export class DecisionEngine {
         await this.call(id, epoch, "organize", "moderator", run.config.moderatorKey, controller)
         await this.advance(id, epoch, draft => {
           const result = organizeSchema.parse(
-            draft.calls.find(call => call.phase === "organize" && call.status === "succeeded")?.result,
+            draft.calls.find(
+              call => call.purpose !== "compaction" && call.phase === "organize" && call.status === "succeeded",
+            )?.result,
           )
           const order = result.priorityIssueIds
           draft.issues.sort(
@@ -547,10 +646,22 @@ export class DecisionEngine {
         await this.seats(id, epoch, "discuss", controller)
         await this.advance(id, epoch, draft => {
           const current = draft.calls
-            .filter(call => call.phase === "discuss" && call.round === draft.round && call.status === "succeeded")
+            .filter(
+              call =>
+                call.purpose !== "compaction" &&
+                call.phase === "discuss" &&
+                call.round === draft.round &&
+                call.status === "succeeded",
+            )
             .map(call => debateSchema.parse(call.result))
           const previous = draft.calls
-            .filter(call => call.phase === "discuss" && call.round === draft.round - 1 && call.status === "succeeded")
+            .filter(
+              call =>
+                call.purpose !== "compaction" &&
+                call.phase === "discuss" &&
+                call.round === draft.round - 1 &&
+                call.status === "succeeded",
+            )
             .map(call => debateSchema.parse(call.result))
           const allNeedEvidence = current.every(item =>
             item.responses.every(response => response.position === "needs_evidence"),
@@ -584,7 +695,9 @@ export class DecisionEngine {
         await this.call(id, epoch, "revise", "editor", run.config.moderatorKey, controller)
         await this.advance(id, epoch, draft => {
           draft.revisionResult = revisionSchema.parse(
-            draft.calls.find(call => call.phase === "revise" && call.status === "succeeded")?.result,
+            draft.calls.find(
+              call => call.purpose !== "compaction" && call.phase === "revise" && call.status === "succeeded",
+            )?.result,
           )
           draft.phase = "verify"
         })
@@ -592,7 +705,9 @@ export class DecisionEngine {
         await this.call(id, epoch, "verify", "verifier", run.config.verifierKey, controller)
         await this.advance(id, epoch, draft => {
           draft.verification = verificationSchema.parse(
-            draft.calls.find(call => call.phase === "verify" && call.status === "succeeded")?.result,
+            draft.calls.find(
+              call => call.purpose !== "compaction" && call.phase === "verify" && call.status === "succeeded",
+            )?.result,
           )
           for (const issue of draft.issues) {
             const verdict = draft.verification.issues.find(item => item.issueId === issue.id)!
