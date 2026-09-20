@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { createPortal } from "react-dom"
 import { Button } from "@deepseek-ai/dsh-client-ui-primitives"
 import type { BetterSidebarService, TabComponentProps } from "dsh-better-sidebar/client/service"
@@ -10,6 +10,7 @@ import {
   type ConversationEvents,
 } from "./chat-messages.js"
 import { fillDecisionDraft, type ComposerInput } from "./composer.js"
+import { createSidebarReveal } from "./sidebar-reveal.js"
 
 export const inject = ["slots", "sessions", "workspaces", "conversationEvents"] as const
 const PREFIX = "session-dsh-decision-room-"
@@ -33,6 +34,14 @@ export type ClientContext = {
     list: {
       getSnapshot(): { current?: string; ids?: string[]; byId?: Record<string, { blank?: boolean; cwd?: string }> }
     }
+    binding(id: string):
+      | {
+          session: {
+            getSnapshot(): { composerPhase?: string; blank?: boolean; running?: boolean }
+            subscribe(listener: () => void): () => void
+          }
+        }
+      | undefined
     create(options: { workspaceId: string; sessionId: string }): Promise<string>
     open(id: string): void
     scope?(id: string): { get(name: string): unknown } | undefined
@@ -67,8 +76,8 @@ function inputFor(ctx: ClientContext, sessionId: string): ComposerInput {
 function Icon(): JSX.Element {
   return (
     <svg
-      width="18"
-      height="18"
+      width="16"
+      height="16"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -118,6 +127,7 @@ function Launcher({ launch, wide = true }: { launch?: () => Promise<void>; wide?
     <div style={{ width: wide ? "100%" : 36, paddingRight: wide ? 12 : 0, boxSizing: "border-box" }}>
       <Button
         variant="ghost"
+        icon={<Icon />}
         type="button"
         aria-label="决策室"
         title={error || "打开决策室"}
@@ -143,10 +153,7 @@ function Launcher({ launch, wide = true }: { launch?: () => Promise<void>; wide?
             .finally(() => setBusy(false))
         }}
       >
-        <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
-          <Icon />
-          {wide ? <span>决策室</span> : null}
-        </span>
+        {wide ? "决策室" : null}
       </Button>
       {error && wide && (
         <p role="alert" style={{ fontSize: 12 }}>
@@ -158,134 +165,86 @@ function Launcher({ launch, wide = true }: { launch?: () => Promise<void>; wide?
   return mount ? createPortal(content, mount) : content
 }
 
-type HomeProps = {
+function DecisionSidebar({
+  sessionId,
+  context,
+  visible,
+}: {
   sessionId: string
-  useSession<T>(
-    selector: (state: {
-      composerPhase?: string
-      blank?: boolean
-      awaitingFirstTurn?: boolean
-      running?: boolean
-      promptAttempted?: boolean
-    }) => T,
-  ): T
-  context?: ClientContext
-}
-function DecisionHome({ sessionId, useSession, context }: HomeProps): JSX.Element | null {
-  const blank = useSession(
-    state =>
-      state.composerPhase === "blank" ||
-      (state.composerPhase === undefined &&
-        (state.blank === true || state.awaitingFirstTurn === true) &&
-        !state.running &&
-        !state.promptAttempted),
-  )
+  context: ClientContext
+  visible: boolean
+}): JSX.Element {
   const frame = useRef<HTMLIFrameElement>(null)
-  const marker = useRef<HTMLDivElement>(null)
+  const session = context.sessions.binding(sessionId)?.session
+  const blank = useSyncExternalStore(
+    listener => session?.subscribe(listener) ?? (() => {}),
+    () => {
+      const state = session?.getSnapshot()
+      return state?.blank === true && !state.running
+    },
+  )
+  const workspace = workspaceFor(context, sessionId)
+  const key = `decision-room:generated:${JSON.stringify([workspace.path, sessionId])}`
   const generated = useRef("")
-  const [prepared, setPrepared] = useState(false)
-  const [height, setHeight] = useState(850)
-  const [error, setError] = useState("")
-  const enabled = sessionId.startsWith(PREFIX)
   useEffect(() => {
-    setPrepared(false)
-    setError("")
-  }, [sessionId])
-  useEffect(() => {
-    if (!enabled || !context) {
-      return
+    try {
+      generated.current = sessionStorage.getItem(key) ?? ""
+    } catch {
+      generated.current = ""
     }
+  }, [key])
+  useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (
         event.origin !== location.origin ||
         event.source !== frame.current?.contentWindow ||
-        event.data?.sessionId !== sessionId
-      ) {
-        return
-      }
-      if (event.data.type === "decision-room:height" && Number.isFinite(event.data.height)) {
-        setHeight(Math.max(200, Math.min(2600, event.data.height)))
-        return
-      }
-      if (
-        event.data.type !== "decision-room:compose" ||
+        event.data?.sessionId !== sessionId ||
+        event.data?.type !== "decision-room:compose" ||
         typeof event.data.text !== "string" ||
-        event.data.text.length > 150000
+        event.data.text.length > 150000 ||
+        typeof event.data.requestId !== "string"
       ) {
         return
       }
+      const reply = (type: string, message?: string) =>
+        frame.current?.contentWindow?.postMessage(
+          { type, sessionId, requestId: event.data.requestId, message },
+          location.origin,
+        )
       try {
-        if (context.sessions.list.getSnapshot().current !== sessionId) {
-          throw new Error("当前会话已经切换，请回到原会话继续")
+        if (!visible || context.sessions.list.getSnapshot().current !== sessionId) {
+          throw new Error("请回到此会话的决策卡片继续编辑")
+        }
+        if (!blank) {
+          throw new Error("材料已经发送，请在主聊天补充意见或发起二次修订")
         }
         fillDecisionDraft(inputFor(context, sessionId), event.data.text, generated.current)
         generated.current = event.data.text
-        setPrepared(true)
-        setError("")
-        frame.current?.contentWindow?.postMessage({ type: "decision-room:composed", sessionId }, location.origin)
-        requestAnimationFrame(() =>
-          marker.current
-            ?.closest("[data-composer-seat]")
-            ?.querySelector<HTMLElement>('[contenteditable="true"], textarea')
-            ?.focus(),
-        )
+        try {
+          sessionStorage.setItem(key, generated.current)
+        } catch {
+          // Synchronization still works if browser storage is unavailable.
+        }
+        reply("decision-room:composed")
       } catch (cause) {
-        const message = cause instanceof Error ? cause.message : "无法回填主聊天"
-        setError(message)
-        frame.current?.contentWindow?.postMessage(
-          { type: "decision-room:compose-error", sessionId, message },
-          location.origin,
-        )
+        reply("decision-room:compose-error", cause instanceof Error ? cause.message : "无法同步主聊天")
       }
     }
     window.addEventListener("message", receive)
     return () => window.removeEventListener("message", receive)
-  }, [sessionId, context, enabled])
-  useEffect(() => {
-    if (!enabled || !blank || !marker.current) {
-      return
-    }
-    const root = marker.current.closest<HTMLElement>('[data-phase="hero"]')
-    if (!root) {
-      return
-    }
-    root.dataset.decisionHome = "true"
-    return () => {
-      delete root.dataset.decisionHome
-    }
-  }, [enabled, blank, sessionId])
-  if (!enabled || !blank || !context) {
-    return null
-  }
-  let workspace: Workspace
-  try {
-    workspace = workspaceFor(context, sessionId)
-  } catch {
-    return <p>请先选择工作空间。</p>
-  }
+  }, [sessionId, context, blank, key, visible])
   return (
-    <div ref={marker} className="decision-chat-home" data-decision-home-session={sessionId}>
-      {prepared && (
-        <p className="decision-draft-ready">
-          材料已放入下方主聊天输入框。可继续修改，点击发送后由 DSH 开始调度四个模型。
-          <button onClick={() => setPrepared(false)}>返回编辑材料</button>
-        </p>
-      )}
-      <iframe
-        ref={frame}
-        title="决策室议题与材料"
-        src={`/decision-room/?${new URLSearchParams({ sessionId, workspaceId: workspace.path!, layout: "chat" })}`}
-        style={{ width: "100%", height, border: 0, display: prepared ? "none" : "block" }}
-      />
-      {error && <p role="alert">{error}</p>}
-    </div>
+    <iframe
+      key={`${sessionId}:${blank}`}
+      ref={frame}
+      title={blank ? "决策室议题与材料" : "决策室只读进度"}
+      src={`/decision-room/?${new URLSearchParams({ sessionId, workspaceId: workspace.path!, layout: blank ? "sidebar" : "progress" })}`}
+      style={{ width: "100%", height: "100%", border: 0, display: "block" }}
+    />
   )
 }
 const CSS = `
-[data-decision-home="true"] { --dsh-chat-content-width: 860px; }
-.decision-chat-home { width: 100%; min-width: 0; }
-.decision-draft-ready { padding: 14px; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-l1, #f5f7fb); border-radius: 10px; line-height: 1.7; }
-.decision-draft-ready button,.decision-chat-actions button { margin: 4px; border: 1px solid var(--dsw-alias-border-l2,#dce4ef); color: inherit; background: transparent; padding: 6px 10px; border-radius: 7px; cursor: pointer; font: inherit; font-size: 12px; }
+.decision-chat-actions button { margin: 4px; border: 1px solid var(--dsw-alias-border-l2,#dce4ef); color: inherit; background: transparent; padding: 6px 10px; border-radius: 7px; cursor: pointer; font: inherit; font-size: 12px; }
 .decision-progress { padding: 18px; margin: 18px 0; border: 1px solid var(--dsw-alias-border-l2,#dce4ef); border-radius: 12px; color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 1.7; }
 .decision-progress header { display: flex; justify-content: space-between; gap: 12px; }
 .decision-progress header span { color: var(--dsw-alias-state-business-primary,#4777cd); }
@@ -300,12 +259,15 @@ const CSS = `
 `
 export function apply(ctx: ClientContext): void {
   let active = true
+  let sidebar: BetterSidebarService | undefined
+  const reveal = createSidebarReveal()
   ctx.effect(() => {
     const style = document.createElement("style")
     style.textContent = CSS
     document.head.append(style)
     return () => {
       active = false
+      reveal.dispose()
       style.remove()
     }
   })
@@ -328,45 +290,47 @@ export function apply(ctx: ClientContext): void {
       DecisionProgressCard,
     ),
   )
-  ctx.slots.inject("conversation.input.dock", () =>
-    ctx.slots.register(
-      { name: "conversation.input.dock", id: "decision-room:home", order: 115, inject: () => ({ context: ctx }) },
-      DecisionHome,
-    ),
-  )
-  // Compatibility for an already-open 0.2 sidebar tab: keep only a read-only progress view, never open it from the entry.
-  ctx.inject(["betterSidebar"], child =>
-    child.effect(() =>
-      child.betterSidebar?.registerTab({
+  ctx.inject(["betterSidebar"], child => {
+    child.effect(() => {
+      const service = child.betterSidebar
+      if (!service) {
+        return
+      }
+      const dispose = service.registerTab({
         id: TAB,
-        title: "决策进度",
+        title: "决策室",
         order: 35,
         single: true,
         hidden: true,
         component: (props: TabComponentProps) => {
-          try {
-            const workspace = workspaceFor(ctx, props.scope.sessionId)
-            return (
-              <iframe
-                title="决策室只读进度"
-                src={`/decision-room/?${new URLSearchParams({ sessionId: props.scope.sessionId, workspaceId: workspace.path!, layout: "progress" })}`}
-                style={{ width: "100%", height: "100%", border: 0 }}
-              />
-            )
-          } catch {
-            return <p>请在主聊天查看决策进度。</p>
-          }
+          const { sessionId } = props.scope
+          useEffect(
+            () => reveal.attach(sessionId, { store: props.store, tabId: props.tab.id }),
+            [sessionId, props.store, props.tab.id],
+          )
+          return <DecisionSidebar sessionId={sessionId} context={ctx} visible={props.visible} />
         },
-      }),
-    ),
-  )
+      })
+      sidebar = service
+      return () => {
+        if (sidebar === service) {
+          sidebar = undefined
+        }
+        dispose()
+      }
+    })
+  })
   const launch = async () => {
+    if (!sidebar?.isTabEnabled(TAB)) {
+      throw new Error("请先启用 Better Sidebar 和决策室标签页")
+    }
     const before = ctx.sessions.list.getSnapshot().current
     const workspace = workspaceFor(ctx, before)
     const list = ctx.sessions.list.getSnapshot()
     const archived = ctx.workspaces.list.getSnapshot().archivedSessionIds ?? []
-    const reusable = list.ids?.find(
+    const reusable = [before, ...(list.ids ?? [])].find(
       id =>
+        id !== undefined &&
         id.startsWith(PREFIX) &&
         list.byId?.[id]?.blank &&
         list.byId[id]?.cwd === workspace.path &&
@@ -377,6 +341,8 @@ export function apply(ctx: ClientContext): void {
       (await ctx.sessions.create({ workspaceId: workspace.workspaceId, sessionId: `${PREFIX}${crypto.randomUUID()}` }))
     if (active && ctx.sessions.list.getSnapshot().current === before) {
       ctx.sessions.open(target)
+      sidebar.openTab({ type: TAB }, { sessionId: target })
+      reveal.request(target)
     }
   }
   ctx.slots.inject("sidebar.footer.action", () =>

@@ -18,10 +18,10 @@
 - Markdown/TXT 方案及补充材料、Markdown/安全 HTML 导出、当前会话历史。
 - DSH 主聊天显示角色评审、交叉回应、修订稿与复核；按版本留存，刷新和重启不会重复发布。
 - 左侧“决策室”与 MCP 连接器、访前尽调入口使用相同原生按钮样式与导航区域；主输入区不再出现重复的打开按钮。
-- 主聊天内填写议题、材料、角色与预算，回填可编辑的原生草稿；用户点击 DSH 发送后，主持 Agent 调用工具启动四席评审。
+- 右侧“新的决策”卡片填写议题、材料、角色与预算，实时同步为可编辑的主聊天草稿；用户点击 DSH 发送后，主持 Agent 调用工具启动四席评审。
 - 主聊天执行卡片实时显示阶段、各模型调用状态与额度；暂停、继续、补充材料、二次修订和人工取舍都在同一聊天中完成。
 - 各角色使用独立的 DSH 原生会话，由 DSH 管理历史、Token 估算及自动压缩；首评完成前互相不可见。
-- 已打开的旧 Better Sidebar 标签降为只读进度，入口不再自动打开侧栏；没有 Better Sidebar 也可完成全部聊天流程。
+- 左侧入口打开 Better Sidebar 右侧配置卡片；发送后卡片转为只读进度，后续讨论和修订保留在主聊天。
 
 ## 已有模型与边界
 
@@ -79,7 +79,7 @@ pnpm pack --pack-destination dist
 完整停止你准备安装的 DSH Profile，然后执行：
 
 ```sh
-dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/dsh-decision-room-0.3.0.tgz
+dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/dsh-decision-room-0.3.1.tgz
 ```
 
 启动 DSH 的进程需要同一份 Host 环境配置，插件不会读取浏览器存储中的密钥：
@@ -88,7 +88,9 @@ dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/
 DSH_DECISION_ENV_FILE=/Users/qcc/WebstormProjects/mcp_web/apps/web/.env.dev dsh web
 ```
 
-通过 **localhost / 127.0.0.1** 打开 DSH。点击左侧“决策室”进入专属 Session，在主聊天填写“01 议题与材料”和“02 成员与边界”，点击“放入主聊天输入框”。这一步不会创建评审或调用模型；核对、修改后点击 DSH 原生发送才启动。
+通过 **localhost / 127.0.0.1** 打开 DSH。点击左侧“决策室”进入专属 Session，右侧打开“新的决策”卡片。填写“01 议题与材料”和“02 成员与边界”时，prompt 实时出现在主聊天输入框，不需要额外点击回填。这一步不会创建评审或调用模型；核对后点击 DSH 原生发送才启动。
+
+如已手工修改主聊天草稿，自动同步会暂停并提示，避免覆盖输入。卡片草稿按工作空间／会话缓存在当前浏览器标签页中，刷新或重新打开可恢复。发送后右侧转为只读进度，补充意见和二次修订继续在主聊天完成。
 
 自然语言入口：也可以直接在主聊天提供方案和明确的评审指令。DSH 主持 Agent 使用 `decision_room_start` 启动真实评审；只有暂存请求使用 `decision_room_prepare`。同一用户消息的重复启动会去重。`decision_room_status` 只读查看状态和结果。
 

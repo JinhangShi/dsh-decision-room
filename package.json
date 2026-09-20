@@ -1,6 +1,6 @@
 {
   "name": "dsh-decision-room",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "DSH 多模型决策室：独立评审、持续质询、证据与分歧、方案修订及人工续议",
   "private": true,
   "type": "module",

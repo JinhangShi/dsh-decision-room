@@ -10,7 +10,7 @@ const scope = {
 const layout = query.get("layout")
 createRoot(document.getElementById("root")!).render(
   layout === "chat" || layout === "progress" || layout === "sidebar" ? (
-    <ChatSetup scope={scope} progressOnly={layout !== "chat"} />
+    <ChatSetup scope={scope} progressOnly={layout === "progress"} />
   ) : (
     <App scope={scope} />
   ),

@@ -1130,3 +1130,27 @@ details summary {
     grid-template-columns: 1fr;
   }
 }
+
+.sidebar-setup-mode .setup {
+  padding: 0;
+}
+.sidebar-setup-mode .section-heading {
+  padding: 16px;
+}
+.sidebar-setup-mode .section-heading h2 {
+  font-size: 19px;
+}
+.sidebar-setup-mode .tabs {
+  padding: 0 16px;
+}
+.sidebar-setup-mode .form-grid,
+.sidebar-setup-mode .role-grid {
+  grid-template-columns: 1fr;
+}
+.sidebar-setup-mode .form-footer {
+  flex-wrap: wrap;
+}
+.sidebar-setup-mode .sync-status {
+  margin: 8px 0 14px;
+  font-size: 12px;
+}

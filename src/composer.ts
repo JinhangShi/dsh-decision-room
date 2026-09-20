@@ -10,7 +10,7 @@ export type ComposerInput = {
 }
 export function fillDecisionDraft(input: ComposerInput, text: string, previousGenerated?: string): void {
   const { draft, phase } = input.state.getSnapshot()
-  if (phase === "submitting" || phase === "adjudicating") {
+  if (phase === "submitting" || phase === "adjudicating" || phase === "claimed") {
     throw new Error("当前聊天正在提交，请稍后回填，材料已保留")
   }
   if (draft.trim() && draft.trim() !== text.trim() && draft !== previousGenerated) {

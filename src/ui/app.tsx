@@ -137,16 +137,21 @@ export function BriefForm({
   parent,
   onSubmit,
   composeOnly = false,
+  onDraftChange,
 }: {
   models: Model[]
   initialBrief: Brief
   initialConfig: RunConfig
   parent: Run | null
   composeOnly?: boolean
+  onDraftChange?(brief: Brief, config: RunConfig): void
   onSubmit(brief: Brief, config: RunConfig, feedback?: string): Promise<void>
 }): JSX.Element {
   const [brief, setBrief] = useState(initialBrief)
   const [config, setConfig] = useState(initialConfig)
+  useEffect(() => {
+    onDraftChange?.(brief, config)
+  }, [brief, config, onDraftChange])
   const [feedback, setFeedback] = useState("")
   const [tab, setTab] = useState("brief")
   const [busy, setBusy] = useState(false)
@@ -179,6 +184,9 @@ export function BriefForm({
   }
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    if (onDraftChange) {
+      return
+    }
     if (!brief.title.trim() || !brief.question.trim() || brief.plan.trim().length < 20) {
       setError("请填写议题、决策问题，以及至少 20 字的方案正文")
       setTab("brief")
@@ -464,14 +472,18 @@ export function BriefForm({
             <button type="button" className="secondary" onClick={() => setTab("brief")}>
               ← 返回材料
             </button>
-            <button type="submit" className="primary" disabled={busy}>
-              {busy ? (composeOnly ? "正在回填…" : "正在创建…") : composeOnly ? "放入主聊天输入框" : "创建并开始评审"}
-            </button>
+            {!onDraftChange && (
+              <button type="submit" className="primary" disabled={busy}>
+                {busy ? (composeOnly ? "正在回填…" : "正在创建…") : composeOnly ? "放入主聊天输入框" : "创建并开始评审"}
+              </button>
+            )}
           </div>
           <p className="hint">
-            {composeOnly
-              ? "此步只回填草稿，不调用模型。请在主聊天核对并发送，DSH 才会按以上角色和预算启动评审。"
-              : "开始即授权在以上模型、材料和额度内调用。执行范围只包含评审，不会修改业务系统。"}
+            {onDraftChange
+              ? "材料、角色和预算已实时同步为主聊天草稿。请在主聊天核对并发送后开始评审。"
+              : composeOnly
+                ? "此步只回填草稿，不调用模型。请在主聊天核对并发送，DSH 才会按以上角色和预算启动评审。"
+                : "开始即授权在以上模型、材料和额度内调用。执行范围只包含评审，不会修改业务系统。"}
           </p>
         </div>
       )}

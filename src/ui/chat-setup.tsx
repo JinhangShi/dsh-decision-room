@@ -1,17 +1,41 @@
-import { useEffect, useMemo, useRef, useState } from "react"
-import type { Run, Scope } from "../core/schema.js"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { z } from "zod"
+import { runConfigSchema, sourceSchema, type Brief, type Run, type RunConfig, type Scope } from "../core/schema.js"
 import { composeDecisionRequest } from "../composer.js"
 import { decisionProgress } from "../dsh/messages.js"
 import { DecisionProgressCard } from "../chat-messages.js"
 import { BriefForm, EMPTY_BRIEF } from "./app.js"
 import { Api, type Bootstrap } from "./api.js"
 
+// Drafts may be incomplete while typing; full validation still happens before a review starts.
+const draftSchema = z.object({
+  brief: z.object({
+    title: z.string(),
+    question: z.string(),
+    objective: z.string(),
+    constraints: z.string(),
+    plan: z.string(),
+    sources: z.array(sourceSchema),
+  }),
+  config: runConfigSchema,
+})
+
 export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progressOnly?: boolean }): JSX.Element {
   const api = useMemo(() => new Api(scope), [scope.sessionId, scope.workspaceId])
+  const key = `decision-room:setup:${JSON.stringify([scope.workspaceId, scope.sessionId])}`
   const [boot, setBoot] = useState<Bootstrap>()
   const [run, setRun] = useState<Run>()
   const [error, setError] = useState("")
-  const pending = useRef<{ resolve(): void; reject(error: Error): void }>()
+  const [sync, setSync] = useState("输入内容后，prompt 会实时出现在主聊天输入框。")
+  const pending = useRef("")
+  const timer = useRef<ReturnType<typeof setTimeout>>()
+  const saved = useMemo(() => {
+    try {
+      return draftSchema.safeParse(JSON.parse(sessionStorage.getItem(key) ?? "null")).data
+    } catch {
+      return undefined
+    }
+  }, [key])
   useEffect(() => {
     let active = true
     const refresh = async () => {
@@ -30,14 +54,14 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
       }
     }
     void refresh()
-    const timer = progressOnly
+    const interval = progressOnly
       ? setInterval(() => {
           void refresh()
         }, 1500)
       : undefined
     return () => {
       active = false
-      clearInterval(timer)
+      clearInterval(interval)
     }
   }, [api, progressOnly])
   useEffect(() => {
@@ -45,39 +69,63 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
       if (
         event.origin !== location.origin ||
         event.source !== window.parent ||
-        event.data?.sessionId !== scope.sessionId
+        event.data?.sessionId !== scope.sessionId ||
+        event.data.requestId !== pending.current
       ) {
         return
       }
       if (event.data.type === "decision-room:composed") {
-        pending.current?.resolve()
-        pending.current = undefined
+        clearTimeout(timer.current)
+        setError("")
+        setSync("已同步到主聊天输入框，核对后点击发送开始评审。")
       }
       if (event.data.type === "decision-room:compose-error") {
-        pending.current?.reject(new Error(event.data.message))
-        pending.current = undefined
+        clearTimeout(timer.current)
+        setError(event.data.message)
+        setSync("同步已暂停，卡片中的材料已保留。")
       }
     }
     window.addEventListener("message", message)
-    const resize = new ResizeObserver(() =>
-      window.parent.postMessage(
-        {
-          type: "decision-room:height",
-          sessionId: scope.sessionId,
-          height: document.getElementById("root")!.scrollHeight + 2,
-        },
-        location.origin,
-      ),
-    )
-    resize.observe(document.getElementById("root")!)
     return () => {
       window.removeEventListener("message", message)
-      resize.disconnect()
-      pending.current?.reject(new Error("会话已关闭，材料没有发送"))
+      clearTimeout(timer.current)
     }
   }, [scope.sessionId])
+  const updateDraft = useCallback(
+    (brief: Brief, config: RunConfig) => {
+      if (!boot) {
+        return
+      }
+      try {
+        sessionStorage.setItem(key, JSON.stringify({ brief, config }))
+      } catch {
+        // Editing and live synchronization do not depend on browser persistence.
+      }
+      const changed =
+        JSON.stringify(brief) !== JSON.stringify(EMPTY_BRIEF) ||
+        JSON.stringify(config) !== JSON.stringify(boot.defaults)
+      if (window.parent === window) {
+        setError("请从 DSH 左侧决策室入口打开卡片")
+        return
+      }
+      pending.current = crypto.randomUUID()
+      clearTimeout(timer.current)
+      setSync(changed ? "正在同步到主聊天输入框…" : "输入内容后，prompt 会实时出现在主聊天输入框。")
+      window.parent.postMessage(
+        {
+          type: "decision-room:compose",
+          sessionId: scope.sessionId,
+          requestId: pending.current,
+          text: changed ? composeDecisionRequest(brief, config) : "",
+        },
+        location.origin,
+      )
+      timer.current = setTimeout(() => setError("主聊天未响应，材料已保留，请重新打开决策室卡片"), 8000)
+    },
+    [boot, key, scope.sessionId],
+  )
   return (
-    <main className="decision-app chat-setup-mode">
+    <main className="decision-app chat-setup-mode sidebar-setup-mode">
       {error && (
         <p role="alert" className="notice error">
           {error}
@@ -87,50 +135,28 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
         <p>正在读取角色与预算配置…</p>
       ) : progressOnly ? (
         <>
-          <p className="notice">这里只显示进度。提交材料、暂停、继续及二次修订，请直接在主聊天完成。</p>
+          <p className="notice">材料已发送。补充意见、暂停、继续及二次修订，请直接在主聊天完成。</p>
           {run ? (
             <DecisionProgressCard node={{ data: decisionProgress(run, boot.models) }} />
           ) : (
-            <p>尚未开始评审，请在主聊天填写材料并发送。</p>
+            <p>等待 DSH 主持处理，调用过程将显示在主聊天。</p>
           )}
         </>
       ) : (
-        <BriefForm
-          models={boot.models}
-          initialBrief={EMPTY_BRIEF}
-          initialConfig={boot.defaults}
-          parent={null}
-          composeOnly
-          onSubmit={async (brief, config) => {
-            if (window.parent === window) {
-              throw new Error("请从 DSH 左侧决策室入口进入，再回填主聊天")
-            }
-            await new Promise<void>((resolve, reject) => {
-              const timer = setTimeout(() => {
-                pending.current = undefined
-                reject(new Error("主聊天未响应，材料已保留，请重试"))
-              }, 8000)
-              pending.current = {
-                resolve: () => {
-                  clearTimeout(timer)
-                  resolve()
-                },
-                reject: error => {
-                  clearTimeout(timer)
-                  reject(error)
-                },
-              }
-              window.parent.postMessage(
-                {
-                  type: "decision-room:compose",
-                  sessionId: scope.sessionId,
-                  text: composeDecisionRequest(brief, config),
-                },
-                location.origin,
-              )
-            })
-          }}
-        />
+        <>
+          <p role="status" className="notice sync-status">
+            {sync}
+          </p>
+          <BriefForm
+            models={boot.models}
+            initialBrief={saved?.brief ?? EMPTY_BRIEF}
+            initialConfig={saved?.config ?? boot.defaults}
+            parent={null}
+            composeOnly
+            onDraftChange={updateDraft}
+            onSubmit={async () => {}}
+          />
+        </>
       )}
     </main>
   )
