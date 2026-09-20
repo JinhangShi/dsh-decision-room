@@ -4,7 +4,7 @@ import type { RunStore } from "../core/store.js"
 import type { Model } from "../core/models.js"
 import type { Run } from "../core/schema.js"
 import type { NativeServices } from "./native-gateway.js"
-import { decisionMessages } from "./messages.js"
+import { decisionMessages, decisionProgress } from "./messages.js"
 
 /** Persist role messages as native plugin conversation events; never impersonate a human or mutate the agent loop's turn counter. */
 export class DecisionTranscript {
@@ -41,6 +41,9 @@ export class DecisionTranscript {
       })
   }
   private async publish(run: Run): Promise<void> {
+    if (run.status === "draft") {
+      return
+    }
     const sessionId = run.scope.sessionId as SessionId
     let session = this.services.sessions.get(sessionId)
     if (!session) {
@@ -60,6 +63,13 @@ export class DecisionTranscript {
     const published = new Set(
       session.events.filter(event => event.type === "decision-room/message").map(event => event.data.id),
     )
+    const previous = session.events
+      .filter(event => event.type === "decision-room/progress")
+      .filter(event => event.data.progress.runId === run.id)
+      .at(-1)
+    if (!previous || previous.data.progress.revision < run.revision) {
+      session.append("decision-room/progress", { initial: !previous, progress: decisionProgress(run, this.models) })
+    }
     for (const message of decisionMessages(run, this.models)) {
       if (!published.has(message.id)) {
         session.append("decision-room/message", message)

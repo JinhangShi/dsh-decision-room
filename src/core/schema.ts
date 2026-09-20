@@ -62,6 +62,7 @@ export const createSchema = z
     config: runConfigSchema,
     parentId: id.optional(),
     feedback: z.string().min(1).max(10000).optional(),
+    submissionMessageId: z.string().min(1).max(200).optional(),
   })
   .strict()
 
@@ -206,6 +207,7 @@ export const runSchema = z.object({
   parentId: id.optional(),
   version: z.number().int().positive(),
   feedback: z.string().optional(),
+  submissionMessageId: z.string().optional(),
   status: z.enum(["draft", "running", "paused", "completed", "cancelled", "failed"]),
   phase: phaseSchema,
   round: z.number().int(),

@@ -30,7 +30,7 @@ const STATUS = {
   cancelled: "已取消",
   failed: "需处理",
 }
-const EMPTY_BRIEF: Brief = {
+export const EMPTY_BRIEF: Brief = {
   title: "",
   question: "",
   objective: "在安全可控的前提下，验证有潜力的业务增长方向。",
@@ -130,17 +130,19 @@ function BudgetFields({
     </>
   )
 }
-function BriefForm({
+export function BriefForm({
   models,
   initialBrief,
   initialConfig,
   parent,
   onSubmit,
+  composeOnly = false,
 }: {
   models: Model[]
   initialBrief: Brief
   initialConfig: RunConfig
   parent: Run | null
+  composeOnly?: boolean
   onSubmit(brief: Brief, config: RunConfig, feedback?: string): Promise<void>
 }): JSX.Element {
   const [brief, setBrief] = useState(initialBrief)
@@ -463,10 +465,14 @@ function BriefForm({
               ← 返回材料
             </button>
             <button type="submit" className="primary" disabled={busy}>
-              {busy ? "正在创建…" : "创建并开始评审"}
+              {busy ? (composeOnly ? "正在回填…" : "正在创建…") : composeOnly ? "放入主聊天输入框" : "创建并开始评审"}
             </button>
           </div>
-          <p className="hint">开始即授权在以上模型、材料和额度内调用。执行范围只包含评审，不会修改业务系统。</p>
+          <p className="hint">
+            {composeOnly
+              ? "此步只回填草稿，不调用模型。请在主聊天核对并发送，DSH 才会按以上角色和预算启动评审。"
+              : "开始即授权在以上模型、材料和额度内调用。执行范围只包含评审，不会修改业务系统。"}
+          </p>
         </div>
       )}
     </form>

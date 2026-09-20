@@ -1,6 +1,7 @@
 import type {} from "@deepseek-ai/dsh-session"
 import type { Model } from "../core/models.js"
 import { reportMarkdown } from "../core/report.js"
+import { spent } from "../core/budget.js"
 import {
   debateSchema,
   organizeSchema,
@@ -21,9 +22,37 @@ export type DecisionMessage = {
   at: number
   kind: "brief" | "review" | "report" | "notice"
 }
+export type DecisionProgress = {
+  id: string
+  runId: string
+  revision: number
+  version: number
+  title: string
+  status: Run["status"]
+  phase: string
+  round: number
+  tokens: number
+  tokenBudget: number
+  maxCalls: number
+  stopReason?: string
+  seats: Array<{ id: string; name: string; model: string }>
+  calls: Array<{
+    id: string
+    seatId: string
+    role: string
+    model: string
+    phase: string
+    round: number
+    status: string
+    purpose?: string
+    tokens: number
+    error?: string
+  }>
+}
 declare module "@deepseek-ai/dsh-session" {
   interface SessionEventMap {
     "decision-room/message": DecisionMessage
+    "decision-room/progress": { initial: boolean; progress: DecisionProgress }
   }
 }
 const PHASE = {
@@ -33,6 +62,39 @@ const PHASE = {
   revise: "修订方案",
   verify: "独立复核",
   finished: "已完成",
+}
+
+export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
+  const modelLabel = (key: string) => models.find(model => model.key === key)?.label ?? key
+  const role = (id: string) =>
+    run.config.seats.find(seat => seat.id === id)?.name ?? (id === "verifier" ? "独立复核" : "主持与编辑")
+  return {
+    id: `${run.id}:progress`,
+    runId: run.id,
+    revision: run.revision,
+    version: run.version,
+    title: run.brief.title,
+    status: run.status,
+    phase: PHASE[run.phase],
+    round: run.round,
+    tokens: spent(run).tokens,
+    tokenBudget: run.config.limits.tokenBudget,
+    maxCalls: run.config.limits.maxCalls,
+    ...(run.stopReason ? { stopReason: run.stopReason } : {}),
+    seats: run.config.seats.map(seat => ({ id: seat.id, name: seat.name, model: modelLabel(seat.modelKey) })),
+    calls: run.calls.map(call => ({
+      id: call.id,
+      seatId: call.seatId,
+      role: role(call.seatId),
+      model: modelLabel(call.modelKey),
+      phase: PHASE[call.phase],
+      round: call.round,
+      status: call.status,
+      ...(call.purpose ? { purpose: call.purpose } : {}),
+      tokens: call.accountedTokens,
+      ...(call.error ? { error: call.error } : {}),
+    })),
+  }
 }
 
 export function decisionMessages(run: Run, models: Model[]): DecisionMessage[] {

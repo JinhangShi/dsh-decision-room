@@ -117,7 +117,7 @@ describe("原生 DSH 上下文和主聊天", () => {
     mirror.reconcile()
     await mirror.idle()
     const count = events.length
-    expect(count).toBe(13)
+    expect(count).toBe(14)
     mirror.reconcile()
     await mirror.idle()
     expect(events).toHaveLength(count)

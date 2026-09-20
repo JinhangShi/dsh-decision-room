@@ -29,7 +29,7 @@ const result = await build({
   platform: "browser",
   target: "es2022",
   jsx: "automatic",
-  external: ["react", "react/jsx-runtime", "react-dom", "react-dom/client"],
+  external: ["@deepseek-ai/dsh-client-ui-primitives", "react", "react/jsx-runtime", "react-dom", "react-dom/client"],
   write: false,
 })
 await writeFile(

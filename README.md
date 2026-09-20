@@ -17,9 +17,11 @@
 - 人工采纳／不采纳／暂缓，绑定确切报告版本；补充反馈后创建新版本，旧记录保持不变。
 - Markdown/TXT 方案及补充材料、Markdown/安全 HTML 导出、当前会话历史。
 - DSH 主聊天显示角色评审、交叉回应、修订稿与复核；按版本留存，刷新和重启不会重复发布。
-- 侧栏负责初始材料、角色与预算配置、进度及任务控制，不再承载讨论全文。
+- 左侧“决策室”与 MCP 连接器、访前尽调入口使用相同原生按钮样式与导航区域；主输入区不再出现重复的打开按钮。
+- 主聊天内填写议题、材料、角色与预算，回填可编辑的原生草稿；用户点击 DSH 发送后，主持 Agent 调用工具启动四席评审。
+- 主聊天执行卡片实时显示阶段、各模型调用状态与额度；暂停、继续、补充材料、二次修订和人工取舍都在同一聊天中完成。
 - 各角色使用独立的 DSH 原生会话，由 DSH 管理历史、Token 估算及自动压缩；首评完成前互相不可见。
-- DSH 左侧入口、当前会话侧栏入口和三个原生工具。兼容 Better Sidebar；缺失时使用 DSH 页面内的原生对话框。
+- 已打开的旧 Better Sidebar 标签降为只读进度，入口不再自动打开侧栏；没有 Better Sidebar 也可完成全部聊天流程。
 
 ## 已有模型与边界
 
@@ -77,7 +79,7 @@ pnpm pack --pack-destination dist
 完整停止你准备安装的 DSH Profile，然后执行：
 
 ```sh
-dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/dsh-decision-room-0.2.0.tgz
+dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/dsh-decision-room-0.3.0.tgz
 ```
 
 启动 DSH 的进程需要同一份 Host 环境配置，插件不会读取浏览器存储中的密钥：
@@ -86,13 +88,15 @@ dsh plugin --profile web add /Users/qcc/WebstormProjects/dsh-decision-room/dist/
 DSH_DECISION_ENV_FILE=/Users/qcc/WebstormProjects/mcp_web/apps/web/.env.dev dsh web
 ```
 
-通过 **localhost / 127.0.0.1** 打开 DSH。点击左侧“决策室”创建专属 Session；也可以在任一已有会话输入区点击“打开决策室”，处理该会话的草稿与报告。
+通过 **localhost / 127.0.0.1** 打开 DSH。点击左侧“决策室”进入专属 Session，在主聊天填写“01 议题与材料”和“02 成员与边界”，点击“放入主聊天输入框”。这一步不会创建评审或调用模型；核对、修改后点击 DSH 原生发送才启动。
 
-自然语言入口：告诉当前会话你的决策问题、目标、边界和方案，Agent 可通过 bundled `decision-room` Skill 调用 `decision_room_prepare` 保存草稿。之后在工作台核对模型和预算并开始。`decision_room_status` 只能读取当前会话的结果，不会增加预算或发起模型请求。
+自然语言入口：也可以直接在主聊天提供方案和明确的评审指令。DSH 主持 Agent 使用 `decision_room_start` 启动真实评审；只有暂存请求使用 `decision_room_prepare`。同一用户消息的重复启动会去重。`decision_room_status` 只读查看状态和结果。
 
-在主聊天补充反馈后，Agent 可调用 `decision_room_continue` 创建下一版草稿。在侧栏刷新版本，核对后开始；反馈不会改写旧结论或自动扩大预算。
+在主聊天发送“请根据这些意见再次评审”，Agent 使用 `decision_room_continue` 创建并启动下一版，默认基于上一版修订稿及原预算。只补充或暂存意见时不自动收费续议。`decision_room_control` 控制暂停、继续、取消和收尾；`decision_room_limits` 接受用户明确要求的额度调整；`decision_room_decide` 记录人工取舍。
 
-关闭工作台仅关闭视图。需要停止任务时使用任务的“暂停讨论”或“取消任务”；**DSH 原生聊天停止按钮不等同于停止决策室的 Host 任务**。
+关闭页面不停止已经授权的评审。需要停止时，在主聊天发送“暂停评审”或“取消评审”；执行卡片也提供回填指令的快捷按钮。**DSH 原生停止按钮只停止当前主持回复；评审任务以执行卡片的状态为准**。
+
+主聊天的主持 Agent 需要使用 DSH 中已配置、支持工具调用的模型。角色调用走决策室现有网关；主持的普通聊天调用由 DSH 自身管理，不计入角色评审的调用次数。
 
 ## 供应商与价格配置
 

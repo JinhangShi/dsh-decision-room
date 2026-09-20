@@ -1096,3 +1096,37 @@ details summary {
 .sidebar-mode .run-heading h1 {
   font-size: 21px;
 }
+
+.chat-setup-mode {
+  min-height: 0;
+  background: transparent;
+  padding: 8px;
+}
+.chat-setup-mode .setup-panel {
+  margin: 0;
+}
+.chat-setup-mode .setup-heading {
+  padding-top: 12px;
+}
+.chat-setup-mode .form-body {
+  padding: 16px;
+}
+.chat-setup-mode .role-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.chat-setup-mode .decision-progress {
+  padding: 16px;
+}
+.chat-setup-mode .decision-seats {
+  display: grid;
+  gap: 12px;
+}
+.chat-setup-mode .decision-seats small,
+.chat-setup-mode .decision-seats span {
+  display: block;
+}
+@media (max-width: 560px) {
+  .chat-setup-mode .role-grid {
+    grid-template-columns: 1fr;
+  }
+}

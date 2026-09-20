@@ -119,6 +119,7 @@ export class DecisionEngine {
       revision: 0,
       scope: input.scope,
       brief: input.brief,
+      submissionMessageId: input.submissionMessageId,
       briefHash: hash(JSON.stringify(input.brief)),
       configurationHash: hash(JSON.stringify(this.models)),
       config: input.config,

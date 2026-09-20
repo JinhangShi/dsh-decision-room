@@ -76,6 +76,18 @@ describe("DSH Host 接入契约", () => {
     const stored = table.get(prepared.id) as { scope: unknown; calls: unknown[] }
     expect(stored.scope).toEqual({ sessionId: "native-session", workspaceId: "/workspace/native" })
     expect(stored.calls).toHaveLength(0)
+    const status = await tools.get("decision_room_status")!.execute({ id: prepared.id }, execution)
+    expect(JSON.parse(JSON.stringify(status))).toEqual(status)
+    expect(status).not.toHaveProperty("verification")
+    expect([...tools.keys()]).toEqual(
+      expect.arrayContaining([
+        "decision_room_start",
+        "decision_room_continue",
+        "decision_room_control",
+        "decision_room_limits",
+        "decision_room_decide",
+      ]),
+    )
     await expect(
       tools
         .get("decision_room_status")!
