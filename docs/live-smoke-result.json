@@ -1,0 +1,136 @@
+{
+  "at": "2026-09-20T01:45:54.254Z",
+  "id": "c4ad6bb7-1db9-400a-afaf-b07554e4d72c",
+  "status": "completed",
+  "phase": "finished",
+  "usage": {
+    "tokens": 78204,
+    "costCny": null,
+    "calls": 11,
+    "uncertain": 0
+  },
+  "reportReady": true,
+  "calls": [
+    {
+      "phase": "independent",
+      "model": "qwen",
+      "returnedModel": "qwen3.8-max",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 840,
+        "outputTokens": 907,
+        "totalTokens": 1747
+      }
+    },
+    {
+      "phase": "independent",
+      "model": "kimi",
+      "returnedModel": "kimi-k2.6",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 787,
+        "outputTokens": 853,
+        "totalTokens": 1640
+      }
+    },
+    {
+      "phase": "independent",
+      "model": "glm",
+      "returnedModel": "glm-5.1",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 794,
+        "outputTokens": 649,
+        "totalTokens": 1443
+      }
+    },
+    {
+      "phase": "independent",
+      "model": "deepseek",
+      "returnedModel": "deepseek-v4.1-flash",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 825,
+        "outputTokens": 1310,
+        "totalTokens": 2135
+      }
+    },
+    {
+      "phase": "organize",
+      "model": "qwen",
+      "returnedModel": "qwen3.8-max",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 7685,
+        "outputTokens": 351,
+        "totalTokens": 8036
+      }
+    },
+    {
+      "phase": "discuss",
+      "model": "qwen",
+      "returnedModel": "qwen3.8-max",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 7932,
+        "outputTokens": 1190,
+        "totalTokens": 9122
+      }
+    },
+    {
+      "phase": "discuss",
+      "model": "kimi",
+      "returnedModel": "kimi-k2.6",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 7693,
+        "outputTokens": 868,
+        "totalTokens": 8561
+      }
+    },
+    {
+      "phase": "discuss",
+      "model": "glm",
+      "returnedModel": "glm-5.1",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 7999,
+        "outputTokens": 668,
+        "totalTokens": 8667
+      }
+    },
+    {
+      "phase": "discuss",
+      "model": "deepseek",
+      "returnedModel": "deepseek-v4.1-flash",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 8050,
+        "outputTokens": 1360,
+        "totalTokens": 9410
+      }
+    },
+    {
+      "phase": "revise",
+      "model": "qwen",
+      "returnedModel": "qwen3.8-max",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 12017,
+        "outputTokens": 3186,
+        "totalTokens": 15203
+      }
+    },
+    {
+      "phase": "verify",
+      "model": "kimi",
+      "returnedModel": "kimi-k2.6",
+      "status": "succeeded",
+      "usage": {
+        "inputTokens": 10786,
+        "outputTokens": 1454,
+        "totalTokens": 12240
+      }
+    }
+  ]
+}

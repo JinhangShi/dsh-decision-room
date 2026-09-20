@@ -1,0 +1,114 @@
+[
+  {
+    "key": "qwen",
+    "label": "千问 3.8 Max",
+    "family": "Qwen",
+    "model": "qwen3.8-max",
+    "transport": "chat",
+    "baseUrlEnv": "AI_GATEWAY_BASE_URL",
+    "apiKeyEnv": "AI_GATEWAY_API_KEY",
+    "enabled": true,
+    "availability": "tested",
+    "note": "2026-09-18 短文本已测通；以当前实际调用为准。",
+    "inputCnyPerMillion": null,
+    "outputCnyPerMillion": null,
+    "contextTokens": 64000,
+    "outputParameter": "max_tokens",
+    "extraBody": {
+      "enable_thinking": false
+    }
+  },
+  {
+    "key": "glm",
+    "label": "智谱 GLM 5.1",
+    "family": "GLM",
+    "model": "glm-5.1",
+    "transport": "chat",
+    "baseUrlEnv": "AI_GATEWAY_BASE_URL",
+    "apiKeyEnv": "AI_GATEWAY_API_KEY",
+    "enabled": true,
+    "availability": "tested",
+    "note": "2026-09-18 短文本已测通；以当前实际调用为准。",
+    "inputCnyPerMillion": null,
+    "outputCnyPerMillion": null,
+    "contextTokens": 64000,
+    "outputParameter": "max_tokens",
+    "extraBody": {
+      "thinking": {
+        "type": "disabled"
+      }
+    }
+  },
+  {
+    "key": "kimi",
+    "label": "Kimi K2.6",
+    "family": "Kimi",
+    "model": "kimi-k2.6",
+    "transport": "chat",
+    "baseUrlEnv": "AI_GATEWAY_BASE_URL",
+    "apiKeyEnv": "AI_GATEWAY_API_KEY",
+    "enabled": true,
+    "availability": "tested",
+    "note": "2026-09-18 短文本已测通；以当前实际调用为准。",
+    "inputCnyPerMillion": null,
+    "outputCnyPerMillion": null,
+    "contextTokens": 64000,
+    "outputParameter": "max_tokens",
+    "extraBody": {}
+  },
+  {
+    "key": "deepseek",
+    "label": "DeepSeek V4.1 Flash",
+    "family": "DeepSeek",
+    "model": "deepseek-v4.1-flash",
+    "transport": "chat",
+    "baseUrlEnv": "AI_GATEWAY_BASE_URL",
+    "apiKeyEnv": "AI_GATEWAY_API_KEY",
+    "enabled": true,
+    "availability": "tested",
+    "note": "2026-09-18 短文本已测通；以当前实际调用为准。",
+    "inputCnyPerMillion": null,
+    "outputCnyPerMillion": null,
+    "contextTokens": 64000,
+    "outputParameter": "max_tokens",
+    "extraBody": {
+      "thinking": {
+        "type": "disabled"
+      }
+    }
+  },
+  {
+    "key": "openai",
+    "label": "OpenAI（待接通）",
+    "family": "OpenAI",
+    "model": "gpt-4o",
+    "transport": "chat",
+    "baseUrlEnv": "AI_GATEWAY_BASE_URL",
+    "apiKeyEnv": "AI_GATEWAY_API_KEY",
+    "enabled": false,
+    "availability": "unavailable",
+    "note": "当前参考网关返回 404，需要获授权的模型 ID 和入口。",
+    "inputCnyPerMillion": null,
+    "outputCnyPerMillion": null,
+    "contextTokens": 64000,
+    "outputParameter": "max_tokens",
+    "extraBody": {}
+  },
+  {
+    "key": "claude",
+    "label": "Claude（待接通）",
+    "family": "Claude",
+    "model": "claude-sonnet-4-5",
+    "transport": "chat",
+    "baseUrlEnv": "AI_GATEWAY_BASE_URL",
+    "apiKeyEnv": "AI_GATEWAY_API_KEY",
+    "enabled": false,
+    "availability": "unavailable",
+    "note": "当前参考网关返回 404，需要获授权的模型 ID 和入口。",
+    "inputCnyPerMillion": null,
+    "outputCnyPerMillion": null,
+    "contextTokens": 64000,
+    "outputParameter": "max_tokens",
+    "extraBody": {}
+  }
+]

@@ -1,0 +1,8 @@
+node_modules
+lib
+dist
+.decision-room
+test-results
+pnpm-lock.yaml
+docs/DEVELOPMENT-PLAN.md
+docs/examples

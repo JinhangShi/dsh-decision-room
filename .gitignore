@@ -1,0 +1,13 @@
+node_modules/
+lib/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.local.json
+.decision-room/
+*.tgz
+.DS_Store
+playwright-report/
+test-results/
