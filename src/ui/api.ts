@@ -7,6 +7,7 @@ export type Bootstrap = {
   mode: "live" | "demo"
   defaults: RunConfig
   contextOwner?: "dsh" | "standalone"
+  gateway?: { configured: boolean; baseUrl: string }
 }
 export class Api {
   token = ""

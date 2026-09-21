@@ -6,7 +6,7 @@ import { DshGateway, HttpGateway, RoutedGateway, type DshLlm } from "./core/gate
 import { briefSchema, limitsSchema, DecisionError, assertScope, type Scope } from "./core/schema.js"
 import { defaultConfiguration } from "./core/models.js"
 import { domainPersistence, RunStore, type StorageDomain } from "./core/store.js"
-import { loadConfiguration } from "./server/config.js"
+import { applyGatewaySettings, gatewaySettingsSchema, loadConfiguration } from "./server/config.js"
 import { createRoutes, type WebServer } from "./server/routes.js"
 import { NativeGateway, type NativeServices } from "./dsh/native-gateway.js"
 import { DecisionTranscript } from "./dsh/transcript.js"
@@ -98,18 +98,14 @@ export function apply(ctx: HostContext): void {
           }
         : undefined
     const demo = process.env.DSH_DECISION_DEMO === "1"
+    const http = new HttpGateway(configuration.env)
     const gateway = native
       ? new NativeGateway(
           native,
           configuration.models,
-          demo
-            ? new DemoGateway(20)
-            : new RoutedGateway(new HttpGateway(configuration.env), new DshGateway(native.llm as unknown as DshLlm)),
+          demo ? new DemoGateway(20) : new RoutedGateway(http, new DshGateway(native.llm as unknown as DshLlm)),
         )
-      : new RoutedGateway(
-          new HttpGateway(configuration.env),
-          llm && typeof llm.stream === "function" ? new DshGateway(llm) : undefined,
-        )
+      : new RoutedGateway(http, llm && typeof llm.stream === "function" ? new DshGateway(llm) : undefined)
     const engine = new DecisionEngine(store, configuration.models, gateway, demo ? "demo" : "live")
     await engine.initialize()
     const transcript = native
@@ -138,7 +134,24 @@ export function apply(ctx: HostContext): void {
       chat: new DecisionChatActions(engine),
       transcript,
       stopContext,
-      routes: createRoutes(engine, new URL("./web/", import.meta.url)),
+      routes: createRoutes(engine, new URL("./web/", import.meta.url), {
+        env: configuration.env,
+        async test(input) {
+          const settings = gatewaySettingsSchema.parse(input)
+          const testEnv = { ...configuration.env }
+          applyGatewaySettings(testEnv, settings)
+          const testGateway = new HttpGateway(testEnv)
+          const model = configuration.models.find(item => item.enabled)
+          if (!model) throw new DecisionError("MODEL_UNAVAILABLE", "没有可测试的已启用模型")
+          return testGateway.generate({
+            model,
+            system: "只回复 OK。",
+            prompt: "连接测试。只回复 OK。",
+            maxOutputTokens: 16,
+            signal: AbortSignal.timeout(15000),
+          })
+        },
+      }),
     }
   })()
   // Fail closed if durable storage or configuration cannot be initialized.

@@ -15,6 +15,7 @@ import { createSidebarAutoOpen, createSidebarReveal } from "./sidebar-reveal.js"
 export const inject = ["slots", "sessions", "workspaces", "conversationEvents"] as const
 const PREFIX = "session-dsh-decision-room-"
 const TAB = "dsh-decision-room:workbench"
+const SETTINGS_TAB = "dsh-decision-room:settings"
 type Workspace = { workspaceId: string; path?: string; sessionIds?: string[] }
 export type ClientContext = {
   slots: {
@@ -91,7 +92,15 @@ function Icon(): JSX.Element {
     </svg>
   )
 }
-function Launcher({ launch, wide = true }: { launch?: () => Promise<void>; wide?: boolean }): JSX.Element {
+function Launcher({
+  launch,
+  openSettings,
+  wide = true,
+}: {
+  launch?: () => Promise<void>
+  openSettings?: () => void
+  wide?: boolean
+}): JSX.Element {
   const [mount, setMount] = useState<HTMLElement | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
@@ -154,6 +163,21 @@ function Launcher({ launch, wide = true }: { launch?: () => Promise<void>; wide?
         }}
       >
         {wide ? "决策室" : null}
+      </Button>
+      <Button
+        variant="ghost"
+        type="button"
+        aria-label="决策室设置"
+        title="决策室设置"
+        style={{
+          width: wide ? "100%" : 36,
+          height: wide ? 36 : 36,
+          justifyContent: wide ? "flex-start" : "center",
+          marginTop: 4,
+        }}
+        onClick={() => openSettings?.()}
+      >
+        {wide ? "设置" : "⚙"}
       </Button>
       {error && wide && (
         <p role="alert" style={{ fontSize: 12 }}>
@@ -373,6 +397,26 @@ export function apply(ctx: ClientContext): void {
           return <DecisionSidebar sessionId={sessionId} context={ctx} visible={props.visible} />
         },
       })
+      const disposeSettings = service.registerTab({
+        id: SETTINGS_TAB,
+        title: "决策室设置",
+        order: 34,
+        single: true,
+        component: (props: TabComponentProps) => {
+          const query = new URLSearchParams({
+            sessionId: props.scope.sessionId,
+            workspaceId: props.scope.cwd ?? "local",
+            layout: "settings",
+          })
+          return (
+            <iframe
+              title="决策室设置"
+              src={`/decision-room/?${query}`}
+              style={{ width: "100%", height: "100%", border: 0 }}
+            />
+          )
+        },
+      })
       sidebar = service
       const detachAutoOpen = autoOpen.attach(service)
       return () => {
@@ -381,6 +425,7 @@ export function apply(ctx: ClientContext): void {
           sidebar = undefined
         }
         dispose()
+        disposeSettings()
       }
     })
   })
@@ -408,9 +453,25 @@ export function apply(ctx: ClientContext): void {
       autoOpen.request(target, `launcher:${target}`)
     }
   }
+  const openSettings = () => {
+    if (!sidebar?.isTabEnabled(SETTINGS_TAB)) {
+      return
+    }
+    const sessionId = ctx.sessions.list.getSnapshot().current
+    if (sessionId) {
+      sidebar.openTab({ type: SETTINGS_TAB }, { sessionId })
+    } else {
+      sidebar.openTab({ type: SETTINGS_TAB })
+    }
+  }
   ctx.slots.inject("sidebar.footer.action", () =>
     ctx.slots.register(
-      { name: "sidebar.footer.action", id: "dsh-decision-room:launcher", order: 25, inject: () => ({ launch }) },
+      {
+        name: "sidebar.footer.action",
+        id: "dsh-decision-room:launcher",
+        order: 25,
+        inject: () => ({ launch, openSettings }),
+      },
       Launcher,
     ),
   )
