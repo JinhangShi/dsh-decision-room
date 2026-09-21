@@ -1704,8 +1704,13 @@ details summary {
   }
 }
 
-.sidebar-setup-mode .setup {
+.sidebar-setup-mode .setup:not(.settings-embedded) {
   padding: 0;
+}
+.sidebar-setup-mode .settings-embedded {
+  width: 100%;
+  margin: 0;
+  padding: 22px;
 }
 .sidebar-setup-mode .section-heading {
   padding: 16px;
@@ -1726,4 +1731,12 @@ details summary {
 .sidebar-setup-mode .sync-status {
   margin: 8px 0 14px;
   font-size: 12px;
+}
+@media (max-width: 560px) {
+  .sidebar-setup-mode .settings-embedded {
+    padding: 18px;
+  }
+  .sidebar-setup-mode .settings-embedded .form-footer button {
+    flex: 1 1 auto;
+  }
 }
