@@ -53,21 +53,6 @@ export const DEFAULT_MODELS: Model[] = [
     note: "2026-09-18：现有网关短文本调用成功，返回的 model 一致；结构化评审以实际调用为准。",
   }),
 )
-DEFAULT_MODELS.push(
-  ...[
-    { key: "openai", label: "OpenAI（待接通）", family: "OpenAI", model: "gpt-4o" },
-    { key: "claude", label: "Claude（待接通）", family: "Claude", model: "claude-sonnet-4-5" },
-  ].map(model =>
-    modelSchema.parse({
-      ...model,
-      transport: "chat",
-      enabled: false,
-      availability: "unavailable",
-      note: "2026-09-18：当前凭据及所测模型均返回 404。需配置获授权的模型 ID 和对应入口。",
-    }),
-  ),
-)
-
 export function getModel(models: Model[], key: string): Model {
   const model = models.find(item => item.key === key)
   if (!model || !model.enabled) {
@@ -86,7 +71,10 @@ export function defaultConfiguration(models: Model[]): RunConfig {
     enabled[index % Math.max(1, enabled.length)]?.key ??
     preferred
   return {
-    seats: DEFAULT_SEATS.map((seat, index) => ({ ...seat, modelKey: select(seat.modelKey, index) })),
+    seats: DEFAULT_SEATS.map((seat, index) => {
+      const modelKey = select(seat.modelKey, index)
+      return { ...seat, modelKey, modelFamily: getModel(models, modelKey).family }
+    }),
     moderatorKey: select("qwen", 0),
     verifierKey: select("kimi", 1),
     limits: { ...DEFAULT_LIMITS },

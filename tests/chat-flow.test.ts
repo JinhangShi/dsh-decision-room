@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest"
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
 import { DecisionChatActions } from "../src/dsh/chat-actions.js"
 import { composeDecisionRequest, fillDecisionDraft } from "../src/composer.js"
-import { decisionProgress } from "../src/dsh/messages.js"
-import { progressNodeDefinition } from "../src/chat-messages.js"
-import { input, setup } from "./fixtures.js"
+import { decisionMessages, decisionProgress, type DecisionMessage } from "../src/dsh/messages.js"
+import { DecisionProgressCard, progressNodeDefinition } from "../src/chat-messages.js"
+import { DecisionChatMessage } from "../src/decision-chat-message.js"
+import { complete, input, setup } from "./fixtures.js"
 
 describe("主聊天驱动决策", () => {
   it("回填材料只写入原生草稿，保留模型、预算和附件，不覆盖未发送内容", () => {
@@ -42,7 +45,7 @@ describe("主聊天驱动决策", () => {
     const replay = await new DecisionChatActions(engine).start(value.scope, { brief: value.brief }, "human-message-1")
     expect(replay.id).toBe(first.id)
     expect(engine.store.list()).toHaveLength(1)
-    expect(replay.calls).toHaveLength(11)
+    expect(replay.calls).toHaveLength(17)
   })
   it("主聊天续议基于上次修订稿，默认仅暂存，明确请求可直接启动且保留旧版本", async () => {
     const { engine } = await setup()
@@ -81,6 +84,7 @@ describe("主聊天驱动决策", () => {
     const { engine } = await setup()
     const run = await engine.create(input())
     const progress = decisionProgress(run, engine.models)
+    expect(run.config.limits.outputTokens).toBe(8000)
     expect(JSON.parse(JSON.stringify(progress))).toEqual(progress)
     const start = { type: "decision-room/progress", seq: 1, data: { initial: true, progress } }
     const update = {
@@ -101,5 +105,88 @@ describe("主聊天驱动决策", () => {
     expect(partialHistory).toMatchObject({ data: { status: "running" } })
     expect(progress).not.toHaveProperty("brief")
     expect(progress).not.toHaveProperty("issues")
+    expect(progress).not.toHaveProperty("ballot")
+  })
+  it("首评公开后在主聊天显示 Host 聚合的逐问题覆盖、票型、证据和阻断项", async () => {
+    const { engine } = await setup()
+    const run = await complete(engine)
+    const progress = decisionProgress(run, engine.models)
+    expect(progress.ballot).toBeDefined()
+    expect(progress.ballot?.issues.length).toBeGreaterThan(0)
+    expect(progress.ballot?.issues[0]).toMatchObject({
+      reviewerCount: expect.any(Number),
+      requiredReviewers: expect.any(Number),
+      modelFamilyCount: expect.any(Number),
+      requiredModelFamilies: expect.any(Number),
+      blockingVotes: expect.any(Number),
+      positions: expect.objectContaining({ needs_evidence: expect.any(Number) }),
+      evidence: expect.objectContaining({ missing: expect.any(Number) }),
+    })
+    expect(progress.maxRounds).toBe(run.config.limits.maxRounds)
+    expect(progress.ballotHistory).toHaveLength(run.round)
+    expect(progress.ballotHistory.every(snapshot => snapshot.interpretation)).toBe(true)
+    const html = renderToStaticMarkup(createElement(DecisionProgressCard, { node: { data: progress } }))
+    expect(html).toContain("表决总览")
+    expect(html).toContain("最低")
+    expect(html).toContain("模型族")
+    expect(html).toContain("阻断票")
+    expect(html).toContain("待补证")
+    expect(html).toContain("证据：支持")
+    expect(html).toContain("多数意见当作事实")
+    const compactHtml = renderToStaticMarkup(
+      createElement(DecisionProgressCard, { compact: true, node: { data: progress } }),
+    )
+    expect(compactHtml).toContain("讨论轮次")
+    expect(compactHtml).toContain("模型调用")
+    expect(compactHtml).toContain("逐轮表决")
+    expect(compactHtml).toContain("第 1 轮")
+    expect(compactHtml).toContain("第 2 轮")
+    expect(compactHtml).toContain("当前不宜直接扩大投入")
+  })
+  it("每轮讨论完成后在主聊天追加不可变的 Host 表决快照", async () => {
+    const { engine } = await setup()
+    const run = await complete(engine)
+    const ballots = decisionMessages(run, engine.models).filter(message => message.kind === "ballot")
+    expect(ballots).toHaveLength(run.round)
+    expect(ballots.map(message => message.id)).toEqual(
+      Array.from({ length: run.round }, (_, index) => `${run.id}:ballot-round-${index + 1}`),
+    )
+    expect(ballots[0]?.text).toContain("第 1 轮表决快照")
+    expect(ballots[0]?.text).toContain("主持解读")
+    expect(ballots[0]?.text).toContain("建议下一步")
+    expect(ballots[0]?.text).toContain("最低")
+    expect(ballots[0]?.text).toContain("阻断票")
+    expect(ballots.at(-1)?.text).toContain("后续改票会出现在下一轮快照")
+  })
+  it("调用中断后明确告知用户不会自动重试以及如何恢复", async () => {
+    const { engine } = await setup()
+    const run = await complete(engine)
+    const progress = decisionProgress(run, engine.models)
+    progress.status = "paused"
+    progress.stopReason = "调用已停止或超时；保留预留额度等待对账"
+    progress.calls[0]!.status = "interrupted"
+    const html = renderToStaticMarkup(createElement(DecisionProgressCard, { node: { data: progress } }))
+    expect(html).toContain("需要你确认后重试")
+    expect(html).toContain("不会自动重试")
+    expect(html).toContain("继续评审")
+    expect(html).toContain("已完成席位不会重复调用")
+  })
+  it("决策消息使用安全 Markdown 渲染，而不是显示原始标记或执行 HTML", () => {
+    const message: DecisionMessage = {
+      id: "message-markdown",
+      runId: "run-markdown",
+      version: 1,
+      role: "独立复核",
+      model: "测试模型",
+      phase: "独立复核",
+      text: "## 结论\n\n- 保留 **人工复核**\n- 拒绝 `<script>alert(1)</script>`",
+      at: 1,
+      kind: "review",
+    }
+    const html = renderToStaticMarkup(createElement(DecisionChatMessage, { data: message }))
+    expect(html).toContain("<h2>结论</h2>")
+    expect(html).toContain("<ul>")
+    expect(html).toContain("<strong>人工复核</strong>")
+    expect(html).not.toContain("<script>")
   })
 })

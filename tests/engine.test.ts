@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { spent } from "../src/core/budget.js"
+import { assessDeliberation } from "../src/core/deliberation.js"
 import { DemoGateway } from "../src/core/demo-gateway.js"
 import { DecisionEngine, publicRun } from "../src/core/engine.js"
 import { GatewayError, type ModelGateway, type ModelRequest, type ModelResponse } from "../src/core/gateway.js"
 import { DEFAULT_MODELS } from "../src/core/models.js"
 import { makePrompt, parseResult } from "../src/core/prompts.js"
+import { configurationWarnings, readDebateResult, REVIEW_MODES, SEAT_TEMPLATES } from "../src/core/schema.js"
 import { RunStore } from "../src/core/store.js"
 import { complete, input, setup, until } from "./fixtures.js"
 
@@ -13,18 +15,143 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 describe("决策室完整流程", () => {
+  it("三种评审模式使用完整固定额度，默认模型目录只含已接通模型", () => {
+    expect(REVIEW_MODES.map(mode => [mode.id, mode.limits.maxDurationMinutes])).toEqual([
+      ["quick", 15],
+      ["standard", 60],
+      ["deep", 240],
+    ])
+    expect(REVIEW_MODES.map(mode => mode.limits.tokenBudget)).toEqual([1000000, 3000000, 6000000])
+    expect(DEFAULT_MODELS.map(model => model.key)).toEqual(["qwen", "glm", "kimi", "deepseek"])
+    expect(DEFAULT_MODELS.every(model => model.enabled)).toBe(true)
+  })
+  it("所有内置模板符合席位协议并保留关键视角", () => {
+    for (const template of SEAT_TEMPLATES) {
+      const value = input()
+      value.config.seats = structuredClone(template.seats)
+      expect(configurationWarnings(value.config).filter(item => item.includes("缺少"))).toEqual([])
+    }
+  })
+  it("五席企业尽调模板可在快速模式内完成跨模型族双人覆盖", async () => {
+    const { engine } = await setup()
+    const value = input()
+    value.config.seats = structuredClone(SEAT_TEMPLATES.find(template => template.id === "due_diligence")!.seats)
+    value.config.limits = { ...value.config.limits, maxRounds: 2, maxCalls: 24 }
+    const run = await complete(engine, value)
+    expect(run.status).toBe("completed")
+    expect(run.round).toBe(2)
+    expect(run.calls.filter(call => call.phase === "interpret")).toHaveLength(2)
+    expect(run.calls.length).toBeLessThanOrEqual(24)
+    const assessment = assessDeliberation(run)
+    expect(assessment.coverageSatisfied).toBe(true)
+    expect(
+      assessment.issues.every(
+        issue =>
+          issue.reviewerCount >= issue.requiredReviewers && issue.modelFamilyCount >= issue.requiredModelFamilies,
+      ),
+    ).toBe(true)
+  })
   it("完成四席独立评审、问题讨论、完整修订和复核，保留未核验事实", async () => {
     const { engine } = await setup()
     const run = await complete(engine)
     expect(run.status).toBe("completed")
-    expect(run.calls).toHaveLength(11)
+    expect(run.calls).toHaveLength(17)
     expect(run.calls.every(call => call.status === "succeeded")).toBe(true)
     expect(run.revisionResult?.fullPlan.length).toBeGreaterThan(80)
     expect(run.issues).toHaveLength(4)
     expect(run.issues.every(issue => issue.status === "needs_evidence")).toBe(true)
     expect(run.humanDecision).toBeUndefined()
-    expect(spent(run).tokens).toBe(11 * 540)
+    expect(spent(run).tokens).toBe(17 * 540)
     expect(spent(run).costCny).toBeNull()
+    expect(run.round).toBe(2)
+    const assessment = assessDeliberation(run)
+    expect(assessment.coverageSatisfied).toBe(true)
+    expect(assessment.issues.every(issue => issue.reviewerCount >= 2)).toBe(true)
+  })
+  it("主持将语义相同的独立首评问题归并为议题簇并保留全部来源 ID", async () => {
+    const demo = new DemoGateway(0)
+    const gateway: ModelGateway = {
+      async generate(request) {
+        const response = await demo.generate(request)
+        const prompt = JSON.parse(request.prompt)
+        if (prompt.phase !== "organize") return response
+        const issueIds = prompt.issues.map((issue: { id: string }) => issue.id)
+        return {
+          ...response,
+          text: JSON.stringify({
+            summary: "四个席位指出同一项根因。",
+            priorityIssueIds: issueIds,
+            issueGroups: [{ title: "统一的关键证据缺口", memberIssueIds: issueIds }],
+          }),
+        }
+      },
+    }
+    const { engine } = await setup(gateway)
+    const run = await complete(engine)
+    expect(run.status).toBe("completed")
+    expect(run.issues).toHaveLength(1)
+    expect(run.issues[0]).toMatchObject({
+      title: "统一的关键证据缺口",
+      severity: "high",
+      sourceIssueIds: expect.arrayContaining(["I-business-1", "I-delivery-1", "I-risk-1", "I-challenge-1"]),
+    })
+    expect(run.issues[0]?.rationale).toContain("[I-business-1]")
+    expect(run.events.some(item => item.type === "issues_grouped")).toBe(true)
+  })
+  it("复核格式失败后自动将错误反馈给同一步骤，保留失败记录并完成重试", async () => {
+    const demo = new DemoGateway(0)
+    let verifyAttempts = 0
+    const gateway: ModelGateway = {
+      async generate(request) {
+        const response = await demo.generate(request)
+        const prompt = JSON.parse(request.prompt)
+        if (prompt.phase !== "verify") {
+          return response
+        }
+        verifyAttempts += 1
+        if (verifyAttempts === 1) {
+          const invalid = JSON.parse(response.text)
+          invalid.issues[0].verdict = "partial"
+          return { ...response, text: JSON.stringify(invalid) }
+        }
+        expect(prompt.validationFeedback).toMatchObject({ previousAttempt: 1 })
+        expect(prompt.validationFeedback.error).toContain("issues.0.verdict")
+        expect(prompt.task).toContain("禁止 partial")
+        return response
+      },
+    }
+    const { engine } = await setup(gateway)
+    const run = await complete(engine)
+    expect(run.status).toBe("completed")
+    const verificationCalls = run.calls.filter(call => call.phase === "verify")
+    expect(verificationCalls).toHaveLength(2)
+    expect(verificationCalls.map(call => call.status)).toEqual(["failed", "succeeded"])
+    expect(verificationCalls.map(call => call.attempt)).toEqual([1, 2])
+    expect(run.events.some(item => item.type === "call_retry")).toBe(true)
+  })
+  it("修订实验遗漏停止条件时自动重试并反馈具体字段", async () => {
+    const demo = new DemoGateway(0)
+    let revisionAttempts = 0
+    const gateway: ModelGateway = {
+      async generate(request) {
+        const response = await demo.generate(request)
+        const prompt = JSON.parse(request.prompt)
+        if (prompt.phase !== "revise") return response
+        revisionAttempts += 1
+        if (revisionAttempts === 1) {
+          const invalid = JSON.parse(response.text)
+          delete invalid.experiments[0].stopCondition
+          return { ...response, text: JSON.stringify(invalid) }
+        }
+        expect(prompt.validationFeedback.error).toContain("experiments.0.stopCondition")
+        expect(prompt.task).toContain("不得省略 stopCondition")
+        return response
+      },
+    }
+    const { engine } = await setup(gateway)
+    const run = await complete(engine)
+    expect(run.status).toBe("completed")
+    expect(run.calls.filter(call => call.phase === "revise").map(call => call.status)).toEqual(["failed", "succeeded"])
   })
   it("首轮上下文不包含他人结论，首轮屏障也保护浏览器投影", async () => {
     const { engine } = await setup()
@@ -41,10 +168,48 @@ describe("决策室完整流程", () => {
   it("编辑使用最新一轮交叉回应，讨论时仍不看同一轮尚在提交的回应", async () => {
     const { engine } = await setup()
     const run = await complete(engine)
-    const debate = run.calls.find(call => call.phase === "discuss")!
+    const debate = run.calls.find(call => call.phase === "discuss" && call.round === run.round)!
     debate.result = { summary: "最新一轮的独特交叉质询", continueDiscussion: false, responses: [] }
     expect(makePrompt(run, "revise", "editor")).toContain("最新一轮的独特交叉质询")
     expect(makePrompt(run, "discuss", "growth")).not.toContain("最新一轮的独特交叉质询")
+  })
+  it("旧版讨论记录可恢复，但不会被误当成无新增信息", () => {
+    const legacy = readDebateResult({
+      summary: "历史讨论",
+      continueDiscussion: false,
+      responses: [
+        {
+          issueId: "I-growth-1",
+          position: "needs_evidence",
+          reasoning: "仍缺少材料",
+          evidenceIds: ["proposal"],
+          proposedChange: "补充试点数据",
+        },
+      ],
+    })
+    expect(legacy.responses[0]).toMatchObject({ evidenceStatus: "missing", newInformation: true })
+  })
+  it("同一模型族的两个角色不构成高风险问题的双模型覆盖", async () => {
+    const { engine } = await setup()
+    const run = await complete(engine)
+    const firstIssue = run.issues[0]!
+    const ballots = run.calls.filter(
+      call =>
+        call.phase === "discuss" &&
+        call.status === "succeeded" &&
+        readDebateResult(call.result).responses.some(response => response.issueId === firstIssue.id),
+    )
+    expect(ballots.length).toBeGreaterThanOrEqual(2)
+    const firstFamily = run.config.seats.find(seat => seat.id === ballots[0]!.seatId)!.modelFamily
+    for (const ballot of ballots) {
+      const seat = run.config.seats.find(item => item.id === ballot.seatId)!
+      seat.modelFamily = firstFamily
+    }
+    const assessment = assessDeliberation(run)
+    const summary = assessment.issues.find(issue => issue.issueId === firstIssue.id)!
+    expect(summary.reviewerCount).toBeGreaterThanOrEqual(2)
+    expect(summary.modelFamilyCount).toBe(1)
+    expect(assessment.coverageSatisfied).toBe(false)
   })
   it("持续产生问题时可运行 24 轮，不被固定 11 次调用截断", async () => {
     const demo = new DemoGateway(0)
@@ -65,11 +230,19 @@ describe("决策室完整流程", () => {
       },
     }
     const { engine } = await setup(gateway)
-    const run = await complete(engine)
+    const value = input()
+    value.config.limits = structuredClone(REVIEW_MODES.find(mode => mode.id === "deep")!.limits)
+    const run = await complete(engine, value)
     expect(run.status).toBe("completed")
     expect(run.round).toBe(24)
-    expect(run.calls).toHaveLength(103)
+    expect(run.calls).toHaveLength(127)
     expect(run.config.limits.maxDurationMinutes).toBe(240)
+    for (const issue of assessDeliberation(run).issues) {
+      const total = Object.values(issue.positions).reduce((sum, count) => sum + count, 0)
+      expect(total).toBe(issue.reviewerCount)
+      expect(total).toBeLessThanOrEqual(run.config.seats.length)
+      expect(issue.blockingVotes).toBeLessThanOrEqual(run.config.seats.length)
+    }
   })
   it("提前保护修订和复核的调用额度", async () => {
     const { engine } = await setup()
@@ -117,7 +290,7 @@ describe("持久化、并发额度与停止", () => {
     const { SYSTEM } = await import("../src/core/prompts.js")
     const firstTokens = estimateTokens(
       SYSTEM,
-      makePrompt(draft, "independent", "growth"),
+      makePrompt(draft, "independent", value.config.seats[0]!.id),
       value.config.limits.outputTokens,
     )
     const updated = await engine.changeLimits(draft.id, draft.scope, draft.revision, {
@@ -164,7 +337,7 @@ describe("持久化、并发额度与停止", () => {
     await engine.idle(run.id)
     run = engine.store.get(run.id)
     expect(run.status).toBe("completed")
-    expect(run.calls).toHaveLength(12)
+    expect(run.calls).toHaveLength(18)
     expect(run.calls[0]?.result).toBeUndefined()
   })
   it("重启恢复会暂停，保留中断调用的预留额度且不自动重发", async () => {
@@ -312,6 +485,22 @@ describe("作用域与人工决策", () => {
     expect(next.version).toBe(2)
     expect(next.parentId).toBe(original.id)
     expect(next.calls).toHaveLength(0)
+    expect(JSON.parse(makePrompt(next, "independent", next.config.seats[0]!.id)).materialIds).toContain("humanFeedback")
+    const response = await new DemoGateway(0).generate({
+      model: DEFAULT_MODELS[0]!,
+      system: "",
+      prompt: makePrompt(next, "independent", next.config.seats[0]!.id),
+      maxOutputTokens: 1000,
+      signal: new AbortController().signal,
+    })
+    const citedFeedback = JSON.parse(response.text)
+    citedFeedback.issues[0].evidenceIds = ["humanFeedback"]
+    expect(() =>
+      parseResult(JSON.stringify(citedFeedback), next, "independent", next.config.seats[0]!.id),
+    ).not.toThrow()
+    expect(() =>
+      parseResult(JSON.stringify(citedFeedback), original, "independent", original.config.seats[0]!.id),
+    ).toThrow("未知 ID：humanFeedback")
     expect(JSON.stringify(engine.store.get(original.id))).toBe(snapshot)
     await expect(engine.decide(decided.id, decided.scope, decided.revision, "reject", "改主意")).rejects.toThrow(
       "尚未记录",
@@ -342,5 +531,29 @@ describe("作用域与人工决策", () => {
     const completed = await complete(engine)
     const revision = { ...completed.revisionResult, changes: [] }
     expect(() => parseResult(JSON.stringify(revision), completed, "revise", "editor")).toThrow("引用")
+  })
+  it("丢弃模型输出中的冗余字段，但仍拒绝缺失的必填字段", async () => {
+    const { engine } = await setup()
+    const completed = await complete(engine)
+    const prompt = makePrompt(completed, "discuss", "delivery")
+    const advertised = JSON.parse(prompt).outputSchema
+    expect(advertised.additionalProperties).toBe(false)
+    expect(advertised.properties.responses.items.additionalProperties).toBe(false)
+    const response = await new DemoGateway(0).generate({
+      model: DEFAULT_MODELS[1]!,
+      system: "",
+      prompt,
+      maxOutputTokens: 1000,
+      signal: new AbortController().signal,
+    })
+    const value = JSON.parse(response.text) as { responses: Array<Record<string, unknown>> }
+    value.responses[0]!.unexpectedBallotField = "应被丢弃的冗余字段"
+    const parsed = parseResult(JSON.stringify(value), completed, "discuss", "delivery")
+    expect(parsed).not.toHaveProperty("responses.0.unexpectedBallotField")
+
+    delete value.responses[0]!.proposedChange
+    expect(() => parseResult(JSON.stringify(value), completed, "discuss", "delivery")).toThrow(
+      "responses.0.proposedChange",
+    )
   })
 })

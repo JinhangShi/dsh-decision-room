@@ -137,7 +137,7 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
         <>
           <p className="notice">材料已发送。补充意见、暂停、继续及二次修订，请直接在主聊天完成。</p>
           {run ? (
-            <DecisionProgressCard node={{ data: decisionProgress(run, boot.models) }} />
+            <DecisionProgressCard compact node={{ data: decisionProgress(run, boot.models) }} />
           ) : (
             <p>等待 DSH 主持处理，调用过程将显示在主聊天。</p>
           )}

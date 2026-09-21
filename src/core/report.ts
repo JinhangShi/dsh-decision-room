@@ -1,11 +1,18 @@
 import { activeElapsed, spent } from "./budget.js"
+import { assessDeliberation } from "./deliberation.js"
 import type { Model } from "./models.js"
-import type { Run } from "./schema.js"
+import { ballotInterpretationSchema, configurationWarnings, type Run } from "./schema.js"
+
+export function formatChinaTime(timestamp: number): string {
+  return new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().replace("Z", "+08:00")
+}
 
 export function reportMarkdown(run: Run, models: Model[]): string {
   const usage = spent(run)
   const complete = run.status === "completed" && run.revisionResult && run.verification
   const unresolved = run.issues.filter(issue => issue.status !== "addressed")
+  const deliberation = assessDeliberation(run)
+  const configWarnings = configurationWarnings(run.config)
   const lines = [
     `# ${run.brief.title} · V${run.version}`,
     "",
@@ -39,6 +46,27 @@ export function reportMarkdown(run: Run, models: Model[]): string {
     "## 修改对照",
     "",
   ]
+  const interpretations = run.calls
+    .filter(call => call.purpose !== "compaction" && call.phase === "interpret" && call.status === "succeeded")
+    .sort((a, b) => a.round - b.round)
+  if (interpretations.length) {
+    lines.push("## 逐轮表决解读", "")
+    for (const call of interpretations) {
+      const value = ballotInterpretationSchema.parse(call.result)
+      lines.push(
+        `### 第 ${call.round} 轮 · ${value.headline}`,
+        "",
+        value.summary,
+        "",
+        `- 关键信号：${value.decisionSignal}`,
+        `- 重点问题：${value.keyIssueIds.join("、") || "无"}`,
+        `- 相比上一轮：${value.changesSincePrevious}`,
+        `- 建议下一步：${value.nextStep}`,
+        `- 注意：${value.caveat}`,
+        "",
+      )
+    }
+  }
   for (const change of run.revisionResult?.changes ?? []) {
     lines.push(
       `### ${change.issueId} · ${{ accepted: "采纳", partial: "部分采纳", rejected: "未采纳" }[change.disposition]}`,
@@ -54,6 +82,7 @@ export function reportMarkdown(run: Run, models: Model[]): string {
     lines.push("当前问题台账没有未解决项；仍需人判断证据和业务适用性。", "")
   }
   for (const issue of unresolved) {
+    const ballot = deliberation.issues.find(item => item.issueId === issue.id)
     lines.push(
       `### ${issue.id} · ${issue.title}`,
       "",
@@ -68,6 +97,10 @@ export function reportMarkdown(run: Run, models: Model[]): string {
       `材料引用：${issue.evidenceIds.join("、") || "无，属于待验证判断"}`,
       "",
       `复核说明：${issue.resolution ?? "尚未复核"}`,
+      "",
+      ballot
+        ? `独立覆盖：席位 ${ballot.reviewerCount}/${ballot.requiredReviewers}，模型族 ${ballot.modelFamilyCount}/${ballot.requiredModelFamilies}；票型：维持 ${ballot.positions.maintain}、修改 ${ballot.positions.revise}、否决 ${ballot.positions.reject}、弃权 ${ballot.positions.abstain}、待补证 ${ballot.positions.needs_evidence}；阻断票 ${ballot.blockingVotes}`
+        : "独立覆盖：尚无讨论票据",
       "",
     )
   }
@@ -109,6 +142,8 @@ export function reportMarkdown(run: Run, models: Model[]): string {
   )
   lines.push(
     `- 模型族数量：${families.size}。同模型多角色不构成多个独立模型；不同模型也可能共享训练偏差。`,
+    ...configWarnings.map(warning => `- 配置警告：${warning}`),
+    `- 讨论聚合：${deliberation.coverageSatisfied ? "所需独立覆盖已达到" : "独立覆盖尚未达到"}；${deliberation.stableBallots ? "连续两轮票型稳定" : "尚未确认连续稳定"}。票型只用于呈现分歧，不把多数意见当作事实。`,
     `- 调用：${usage.calls}/${run.config.limits.maxCalls}；已计入及预留 Token：${usage.tokens}；其中 ${usage.uncertain} 次用量未确定。`,
     `- 费用：${usage.costCny === null ? "价格未配置，金额未核定" : `按配置价格估算 ¥${usage.costCny.toFixed(6)}，最终以供应商账单为准`}`,
     `- 活跃时间：${Math.ceil(activeElapsed(run) / 60000)} 分钟；最长 ${run.config.limits.maxDurationMinutes} 分钟。`,
@@ -123,9 +158,12 @@ export function reportMarkdown(run: Run, models: Model[]): string {
       `- ${source.id}：${source.title}${source.url ? `；出处 ${source.url}` : ""}（用户提交，未经独立事实核验）`,
     )
   }
+  if (run.feedback) {
+    lines.push("- humanFeedback：本轮人工反馈（用户提交，未经独立事实核验）")
+  }
   lines.push("", "## 原始方案", "", run.brief.plan, "", "## 操作与阶段记录", "")
   for (const item of run.events) {
-    lines.push(`- ${new Date(item.at).toISOString()} · ${item.text}`)
+    lines.push(`- ${formatChinaTime(item.at)} · ${item.text}`)
   }
   return lines.join("\n")
 }

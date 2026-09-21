@@ -1,4 +1,4 @@
-import type { SidebarState, SidebarStore } from "dsh-better-sidebar/client/service"
+import type { BetterSidebarService, SidebarState, SidebarStore } from "dsh-better-sidebar/client/service"
 
 type Target = { store: Pick<SidebarStore, "reduce">; tabId: string }
 
@@ -56,6 +56,51 @@ export function createSidebarReveal() {
       disposed = true
       targets.clear()
       pending.clear()
+    },
+  }
+}
+
+type SidebarScope = { sessionId: string; cwd?: string }
+
+/** Opens the progress tab once per run, including when progress arrives before Better Sidebar is ready. */
+export function createSidebarAutoOpen(
+  tabType: string,
+  scopeFor: (sessionId: string) => SidebarScope | undefined,
+  requestReveal: (sessionId: string) => void,
+) {
+  let service: Pick<BetterSidebarService, "isTabEnabled" | "openTab"> | undefined
+  let disposed = false
+  const openedRuns = new Set<string>()
+  const pendingRuns = new Map<string, string>()
+  const request = (sessionId: string, runId: string): void => {
+    if (disposed || openedRuns.has(runId)) return
+    if (!service) {
+      pendingRuns.set(runId, sessionId)
+      return
+    }
+    if (!service.isTabEnabled(tabType)) return
+    const scope = scopeFor(sessionId)
+    if (!scope) return
+    service.openTab({ type: tabType }, scope)
+    requestReveal(sessionId)
+    openedRuns.add(runId)
+    pendingRuns.delete(runId)
+  }
+  return {
+    attach(next: Pick<BetterSidebarService, "isTabEnabled" | "openTab">): () => void {
+      if (disposed) return () => {}
+      service = next
+      for (const [runId, sessionId] of pendingRuns) request(sessionId, runId)
+      return () => {
+        if (service === next) service = undefined
+      }
+    },
+    request,
+    dispose(): void {
+      disposed = true
+      service = undefined
+      openedRuns.clear()
+      pendingRuns.clear()
     },
   }
 }

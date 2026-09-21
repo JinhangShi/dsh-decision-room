@@ -5,11 +5,14 @@ import { describe, expect, it } from "vitest"
 import { DecisionEngine } from "../src/core/engine.js"
 import { DemoGateway } from "../src/core/demo-gateway.js"
 import { DEFAULT_MODELS } from "../src/core/models.js"
-import { reportHtml } from "../src/core/report.js"
+import { formatChinaTime, reportHtml } from "../src/core/report.js"
 import { FilePersistence, MemoryPersistence, RunStore } from "../src/core/store.js"
 import { complete, input, setup } from "./fixtures.js"
 
 describe("持久存储与导出", () => {
+  it("报告时间使用明确的北京时间偏移，不受运行机器时区影响", () => {
+    expect(formatChinaTime(Date.parse("2026-09-20T09:32:33.986Z"))).toBe("2026-09-20T17:32:33.986+08:00")
+  })
   it("并发修改不丢更新，并在新实例中恢复全部记录", async () => {
     const directory = await mkdtemp(join(tmpdir(), "decision-store-test-"))
     const store = new RunStore(new FilePersistence(directory))

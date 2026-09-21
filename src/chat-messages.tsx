@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import type { DecisionMessage, DecisionProgress } from "./dsh/messages.js"
 
 type Event = { type: string; seq: number; data: unknown }
@@ -58,12 +58,21 @@ export const progressNodeDefinition = {
 export function DecisionProgressCard({
   node,
   request,
+  onRunning,
+  compact = false,
 }: {
   node: { data: DecisionProgress }
   request?(text: string): void
+  onRunning?(runId: string): void
+  compact?: boolean
 }): JSX.Element {
   const value = node.data
   const [error, setError] = useState("")
+  useEffect(() => {
+    if (value.status === "running") {
+      onRunning?.(value.runId)
+    }
+  }, [onRunning, value.runId, value.status])
   const state = {
     draft: "待开始",
     running: "正在评审",
@@ -72,6 +81,17 @@ export function DecisionProgressCard({
     cancelled: "已取消",
     failed: "需处理",
   }[value.status]
+  const failedCalls = value.calls.filter(call => call.status === "failed" || call.status === "interrupted").length
+  const interruptedCalls = value.calls.filter(call => call.status === "interrupted").length
+  const submittedSeats = value.seats.filter(seat =>
+    value.calls.some(call => call.seatId === seat.id && call.status === "succeeded"),
+  ).length
+  const callStatus = {
+    running: { label: "调用中", mark: "..." },
+    succeeded: { label: "已完成", mark: "✓" },
+    failed: { label: "失败", mark: "!" },
+    interrupted: { label: "已中断", mark: "×" },
+  } as Record<string, { label: string; mark: string }>
   const action = (text: string) => {
     try {
       request?.(`${text}（决策任务 ${value.runId}，V${value.version}）。`)
@@ -81,7 +101,7 @@ export function DecisionProgressCard({
     }
   }
   return (
-    <section className="decision-progress" data-decision-progress={value.id}>
+    <section className="decision-progress" data-decision-progress={value.id} data-compact={compact || undefined}>
       <header>
         <strong>DSH 多模型决策 · V{value.version}</strong>
         <span role="status">{state}</span>
@@ -90,59 +110,225 @@ export function DecisionProgressCard({
         {value.title} · {value.phase}
         {value.round ? ` · 第 ${value.round} 轮` : ""}
       </p>
-      <div className="decision-seats">
-        {value.seats.map(seat => {
-          const call = value.calls.filter(call => call.seatId === seat.id).at(-1)
-          return (
-            <div key={seat.id}>
-              <strong>{seat.name}</strong>
-              <small>{seat.model}</small>
-              <span>
-                {call?.status === "running"
-                  ? "◌ 调用中"
-                  : call?.status === "succeeded"
-                    ? "✓ 已提交"
-                    : call?.status === "failed" || call?.status === "interrupted"
-                      ? "待处理"
-                      : "等待调度"}
-              </span>
-            </div>
-          )
-        })}
-      </div>
+      {compact ? (
+        <p className="decision-seat-summary">
+          {submittedSeats}/{value.seats.length} 个席位已提交 · {value.calls.length} 次调用
+          {failedCalls ? ` · ${failedCalls} 次需关注` : ""}
+        </p>
+      ) : (
+        <div className="decision-seats">
+          {value.seats.map(seat => {
+            const call = value.calls.filter(call => call.seatId === seat.id).at(-1)
+            return (
+              <div key={seat.id}>
+                <strong>{seat.name}</strong>
+                <small>{seat.model}</small>
+                <span>
+                  {call?.status === "running"
+                    ? "◌ 调用中"
+                    : call?.status === "succeeded"
+                      ? "✓ 已提交"
+                      : call?.status === "failed" || call?.status === "interrupted"
+                        ? "待处理"
+                        : "等待调度"}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
       <p className="decision-caption">
-        调用 {value.calls.length} / {value.maxCalls} · 已计入 / 预留 {value.tokens.toLocaleString()} /{" "}
-        {value.tokenBudget.toLocaleString()} Token
+        {compact
+          ? "完整发言和报告保留在主聊天。"
+          : `调用 ${value.calls.length} / ${value.maxCalls} · 已计入 / 预留 ${value.tokens.toLocaleString()} / ${value.tokenBudget.toLocaleString()} Token`}
       </p>
-      {value.stopReason && <p role="status">{value.stopReason}</p>}
-      <details open={value.status === "running"}>
-        <summary>模型调用过程</summary>
-        <ol className="decision-call-list">
-          {value.calls.map(call => (
-            <li key={call.id} data-call-status={call.status}>
-              <span>
-                {call.role} · {call.model}
+      {compact && (
+        <div className="decision-limit-summary" aria-label="任务执行上限">
+          <span>
+            讨论轮次 <strong>{value.round}</strong> / {value.maxRounds}
+          </span>
+          <span>
+            模型调用 <strong>{value.calls.length}</strong> / {value.maxCalls}
+          </span>
+        </div>
+      )}
+      {compact && value.ballotHistory.length > 0 && (
+        <section className="decision-ballot-history" aria-label="逐轮表决快照">
+          <h3>逐轮表决</h3>
+          {value.ballotHistory.map((snapshot, index) => (
+            <details key={snapshot.round} open={index === value.ballotHistory.length - 1}>
+              <summary>
+                <span>第 {snapshot.round} 轮</span>
                 <small>
-                  {call.purpose === "compaction" ? "DSH 上下文压缩" : call.phase}
-                  {call.round ? ` · 第 ${call.round} 轮` : ""}
+                  {snapshot.ballot.issues.length} 项 · {snapshot.ballot.coverageSatisfied ? "覆盖达标" : "覆盖进行中"}
                 </small>
-              </span>
-              <span>
-                {
-                  (
-                    { running: "调用中…", succeeded: "已完成", failed: "失败", interrupted: "已中断" } as Record<
-                      string,
-                      string
-                    >
-                  )[call.status]
-                }
-                <small>{call.tokens.toLocaleString()} Token</small>
-              </span>
-              {call.error && <p>{call.error}</p>}
-            </li>
+              </summary>
+              {snapshot.interpretation ? (
+                <div className="decision-ballot-interpretation">
+                  <strong>{snapshot.interpretation.headline}</strong>
+                  <p>{snapshot.interpretation.summary}</p>
+                  <p>
+                    <b>相比上一轮：</b>
+                    {snapshot.interpretation.changesSincePrevious}
+                  </p>
+                  <p>
+                    <b>下一步：</b>
+                    {snapshot.interpretation.nextStep}
+                  </p>
+                  <small>{snapshot.interpretation.caveat}</small>
+                </div>
+              ) : (
+                <p className="decision-caption">该轮来自旧版本任务，只有 Host 统计，没有主持模型解读。</p>
+              )}
+              <div className="decision-ballot-list">
+                {snapshot.ballot.issues.map(issue => (
+                  <article key={issue.id} data-blocking={issue.blockingVotes > 0}>
+                    <div className="decision-ballot-heading">
+                      <strong>{issue.title}</strong>
+                      <small>{issue.severity}</small>
+                    </div>
+                    <div className="decision-ballot-coverage">
+                      <span>
+                        {issue.reviewerCount} 席（最低 {issue.requiredReviewers}）
+                      </span>
+                      <span>
+                        {issue.modelFamilyCount} 模型族（最低 {issue.requiredModelFamilies}）
+                      </span>
+                      <span>阻断票 {issue.blockingVotes}</span>
+                    </div>
+                    <div className="decision-ballot-votes">
+                      <span>维持 {issue.positions.maintain}</span>
+                      <span>修改 {issue.positions.revise}</span>
+                      <span>否决 {issue.positions.reject}</span>
+                      <span>弃权 {issue.positions.abstain}</span>
+                      <span>待补证 {issue.positions.needs_evidence}</span>
+                    </div>
+                    <div className="decision-ballot-evidence">
+                      证据：支持 {issue.evidence.supported} · 冲突 {issue.evidence.conflicting} · 缺失{" "}
+                      {issue.evidence.missing}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </details>
           ))}
-        </ol>
-      </details>
+        </section>
+      )}
+      {!compact && value.ballot && (
+        <details
+          className="decision-ballot"
+          open={!compact && (value.phase === "交叉讨论" || value.status === "completed")}
+        >
+          <summary>
+            <span>表决总览</span>
+            <small>
+              {value.ballot.issues.length} 项 · {value.ballot.coverageSatisfied ? "覆盖达标" : "覆盖进行中"}
+              {value.ballot.stableBallots ? " · 票型稳定" : ""}
+            </small>
+          </summary>
+          <div className="decision-ballot-legend">
+            <p>
+              <strong>独立覆盖</strong>：已投票席位数与最低要求；模型族表示独立模型来源及最低要求。
+            </p>
+            <p>
+              <strong>阻断票</strong>：认为该问题不解决就不应推进的席位数。
+            </p>
+            <p>
+              <strong>立场</strong>：维持当前判断、修改方案、否决方案、弃权或等待补证。
+            </p>
+            <p>
+              <strong>证据</strong>：评审认为材料支持、相互冲突或缺失；不代表外部核验。
+            </p>
+          </div>
+          {value.ballot.issues.length === 0 ? (
+            <p className="decision-caption">主持整理问题后显示逐问题表决。</p>
+          ) : (
+            <div className="decision-ballot-list">
+              {value.ballot.issues.map(issue => (
+                <article key={issue.id} data-blocking={issue.blockingVotes > 0}>
+                  <div className="decision-ballot-heading">
+                    <span>{issue.id}</span>
+                    <strong>{issue.title}</strong>
+                    <small>
+                      {issue.severity}
+                      {issue.sourceIssueCount > 1 ? ` · 合并 ${issue.sourceIssueCount} 条首评` : ""}
+                    </small>
+                  </div>
+                  <div className="decision-ballot-coverage">
+                    <span>
+                      {issue.reviewerCount} 席 · 最低 {issue.requiredReviewers}
+                    </span>
+                    <span>
+                      {issue.modelFamilyCount} 模型族 · 最低 {issue.requiredModelFamilies}
+                    </span>
+                    <span>阻断票 {issue.blockingVotes}</span>
+                  </div>
+                  <div className="decision-ballot-votes" aria-label={issue.title + "的表决票型"}>
+                    <span>维持 {issue.positions.maintain}</span>
+                    <span>修改 {issue.positions.revise}</span>
+                    <span>否决 {issue.positions.reject}</span>
+                    <span>弃权 {issue.positions.abstain}</span>
+                    <span>待补证 {issue.positions.needs_evidence}</span>
+                  </div>
+                  <div className="decision-ballot-evidence">
+                    证据：支持 {issue.evidence.supported} · 冲突 {issue.evidence.conflicting} · 缺失{" "}
+                    {issue.evidence.missing}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+          <p className="decision-caption">票数呈现分歧，不把多数意见当作事实。事实是否成立仍取决于材料证据。</p>
+        </details>
+      )}
+      {value.stopReason && <p role="status">{value.stopReason}</p>}
+      {value.status === "paused" && interruptedCalls > 0 && (
+        <div className="decision-recovery" role="note">
+          <strong>需要你确认后重试</strong>
+          <span>
+            为避免上游重复计费，中断或超时不会自动重试。
+            {request ? "点击下方“继续”即可从检查点恢复；" : "请在主聊天发送“继续评审”；"}
+            已完成席位不会重复调用。
+          </span>
+        </div>
+      )}
+      {!compact && (
+        <details className="decision-call-history" open={value.status === "running" || value.status === "completed"}>
+          <summary>
+            <span>模型调用过程</span>
+            <small>
+              {value.calls.length} 次调用{failedCalls ? ` · ${failedCalls} 次需关注` : ""}
+            </small>
+          </summary>
+          <ol className="decision-call-list">
+            {value.calls.map((call, index) => (
+              <li key={call.id} data-call-status={call.status}>
+                <span className="decision-call-index">{index + 1}</span>
+                <span className="decision-call-mark" aria-hidden="true">
+                  {callStatus[call.status]?.mark ?? "-"}
+                </span>
+                <div className="decision-call-main">
+                  <div className="decision-call-title">
+                    <strong>{call.role}</strong>
+                    <span>{call.model}</span>
+                  </div>
+                  <div className="decision-call-meta">
+                    <span>{call.purpose === "compaction" ? "DSH 上下文压缩" : call.phase}</span>
+                    {call.round > 0 && <span>第 {call.round} 轮</span>}
+                    {(call.attempt ?? 1) > 1 && <span>第 {call.attempt} 次尝试</span>}
+                  </div>
+                  {call.error && <p>{call.error}</p>}
+                </div>
+                <div className="decision-call-result">
+                  <span className="decision-call-status">{callStatus[call.status]?.label ?? call.status}</span>
+                  <strong>{call.tokens.toLocaleString()}</strong>
+                  <small>Token</small>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
       <p className="decision-caption">独立首评全部提交后统一公开。补充材料、提异议和再次修订，直接在主聊天发送。</p>
       {request && (
         <div className="decision-chat-actions">
@@ -194,56 +380,4 @@ export const decisionNodeDefinition = {
       data: context.state,
     }
   },
-}
-export function DecisionChatMessage(props: {
-  node?: { data: DecisionMessage }
-  data?: DecisionMessage
-}): JSX.Element | null {
-  const message = props.node?.data ?? props.data
-  const [expanded, setExpanded] = useState(false)
-  if (!message) {
-    return null
-  }
-  const long = message.text.length > 2500
-  return (
-    <article
-      data-decision-message={message.id}
-      style={{
-        margin: "18px 0",
-        padding: "18px 22px",
-        border: "1px solid #dce4ef",
-        borderRadius: 12,
-        background: "var(--color-bg, #fff)",
-        color: "var(--color-text, #263449)",
-        maxWidth: "100%",
-      }}
-    >
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 14 }}>
-        <strong>{message.role}</strong>
-        <span style={{ fontSize: 12, opacity: 0.7 }}>
-          {message.model} · {message.phase} · V{message.version}
-        </span>
-      </div>
-      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.8, fontSize: 14 }}>
-        {long && !expanded ? `${message.text.slice(0, 2000)}\n…` : message.text}
-      </div>
-      {long && (
-        <button
-          type="button"
-          onClick={() => setExpanded(!expanded)}
-          style={{
-            marginTop: 12,
-            padding: "6px 12px",
-            border: "1px solid #dce4ef",
-            borderRadius: 6,
-            background: "transparent",
-            color: "inherit",
-            cursor: "pointer",
-          }}
-        >
-          {expanded ? "收起" : "展开完整内容"}
-        </button>
-      )}
-    </article>
-  )
 }

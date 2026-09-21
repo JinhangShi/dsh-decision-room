@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { SidebarState } from "dsh-better-sidebar/client/service"
-import { createSidebarReveal } from "./sidebar-reveal.js"
+import { createSidebarAutoOpen, createSidebarReveal } from "./sidebar-reveal.js"
 
 function fixture(placement: "right" | "bottom" | "float" = "right") {
   const tab = { id: "decision", type: "dsh-decision-room:workbench", title: "决策室" }
@@ -69,5 +69,39 @@ describe("DSH collapsed sidebar compatibility", () => {
     controller.attach("session", nextView)
     controller.request("session")
     expect(nextView.current().panelOpen).toBe(false)
+  })
+})
+
+describe("决策进度自动打开侧栏", () => {
+  it("在 Sidebar 服务就绪前排队，并且每个任务只打开一次", () => {
+    const opened: Array<{ seed: { type: string }; scope?: { sessionId: string; cwd?: string } }> = []
+    const revealed: string[] = []
+    const controller = createSidebarAutoOpen(
+      "decision-room",
+      sessionId => ({ sessionId, cwd: "/workspace" }),
+      sessionId => revealed.push(sessionId),
+    )
+    controller.request("session-1", "run-1")
+    controller.attach({
+      isTabEnabled: () => true,
+      openTab: (seed, scope) => opened.push({ seed, scope }),
+    })
+    controller.request("session-1", "run-1")
+    expect(opened).toEqual([{ seed: { type: "decision-room" }, scope: { sessionId: "session-1", cwd: "/workspace" } }])
+    expect(revealed).toEqual(["session-1"])
+  })
+
+  it("尊重用户禁用状态，且销毁后不再打开", () => {
+    let opens = 0
+    const controller = createSidebarAutoOpen(
+      "decision-room",
+      sessionId => ({ sessionId }),
+      () => {},
+    )
+    controller.attach({ isTabEnabled: () => false, openTab: () => (opens += 1) })
+    controller.request("session-1", "run-1")
+    controller.dispose()
+    controller.request("session-1", "run-2")
+    expect(opens).toBe(0)
   })
 })

@@ -64,7 +64,7 @@ class DecisionAdapter extends LlmAdapter {
       id: key,
       name: model.label,
       context: { contextWindow: model.contextTokens },
-      defaultMaxTokens: 4000,
+      defaultMaxTokens: 8000,
       inputModalities: ["text" as const],
     }
   }

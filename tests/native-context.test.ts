@@ -64,7 +64,7 @@ describe("原生 DSH 上下文和主聊天", () => {
     })
     const run = await complete(engine)
     expect(run.status).toBe("completed")
-    expect(run.calls.filter(call => call.purpose === "compaction")).toHaveLength(11)
+    expect(run.calls.filter(call => call.purpose === "compaction")).toHaveLength(17)
     expect(spent(run).calls).toBe(dispatched)
     expect(run.issues).toHaveLength(4)
   })
@@ -117,7 +117,10 @@ describe("原生 DSH 上下文和主聊天", () => {
     mirror.reconcile()
     await mirror.idle()
     const count = events.length
-    expect(count).toBe(14)
+    expect(count).toBe(decisionMessages(run, engine.models).length + 1)
+    expect(events.filter(event => event.type === "decision-room/message")).toHaveLength(
+      decisionMessages(run, engine.models).length,
+    )
     mirror.reconcile()
     await mirror.idle()
     expect(events).toHaveLength(count)

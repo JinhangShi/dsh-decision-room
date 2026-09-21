@@ -3,10 +3,11 @@ import { activeElapsed, cost, estimateTokens, reserveCheck, settle, spent } from
 import { GatewayError, type ModelGateway, type ModelResponse, type ContextDispatch } from "./gateway.js"
 import { getModel, type Model } from "./models.js"
 import { assignedIssues, makePrompt, parseResult, SYSTEM } from "./prompts.js"
+import { assessDeliberation } from "./deliberation.js"
 import {
   assertScope,
+  configurationWarnings,
   createSchema,
-  debateSchema,
   DecisionError,
   limitsSchema,
   organizeSchema,
@@ -34,10 +35,26 @@ function stopClock(run: Run): void {
 function safeError(error: unknown): string {
   return error instanceof DecisionError ? error.message : "处理失败；检查点已保留。请检查 Host 日志和存储可用性"
 }
+function retryableOutputError(error: unknown): boolean {
+  return error instanceof DecisionError && ["OUTPUT_JSON", "OUTPUT_SCHEMA", "REFERENCES"].includes(error.code)
+}
+const SEVERITY_RANK = { low: 0, medium: 1, high: 2, critical: 3 } as const
+function mergedIssueText(
+  members: Run["issues"],
+  field: "rationale" | "suggestedChange" | "whatWouldChangeMind",
+): string {
+  const value = members.map(issue => `[${issue.id}] ${issue[field]}`).join("\n")
+  return value.length <= 2000 ? value : `${value.slice(0, 1999)}…`
+}
 function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const abort = () => {
-      reject(new DecisionError("ABORTED", "调用已停止或超时；保留预留额度等待对账"))
+      reject(
+        new DecisionError(
+          "ABORTED",
+          "调用已停止或超时；保留预留额度等待对账。为避免重复计费，系统不会自动重试；请从检查点继续，已完成席位不会重复调用",
+        ),
+      )
     }
     if (signal.aborted) {
       abort()
@@ -100,6 +117,13 @@ export class DecisionEngine {
         throw new DecisionError("PRICE_REQUIRED", "启用金额预算前，需要为所有参与模型配置实际 API 价格")
       }
     }
+    const config = {
+      ...input.config,
+      seats: input.config.seats.map(seat => ({
+        ...seat,
+        modelFamily: getModel(this.models, seat.modelKey).family,
+      })),
+    }
     let version = 1
     if (input.parentId) {
       const parent = this.store.get(input.parentId)
@@ -122,7 +146,7 @@ export class DecisionEngine {
       submissionMessageId: input.submissionMessageId,
       briefHash: hash(JSON.stringify(input.brief)),
       configurationHash: hash(JSON.stringify(this.models)),
-      config: input.config,
+      config,
       version,
       parentId: input.parentId,
       feedback: input.feedback,
@@ -144,6 +168,9 @@ export class DecisionEngine {
       "created",
       input.parentId ? "已创建人工反馈后的新版本；旧版本保持不变，重新进行独立评审" : "已冻结共同材料，等待开始评审",
     )
+    for (const warning of configurationWarnings(config)) {
+      event(run, "configuration_warning", warning)
+    }
     return this.store.insert(run)
   }
   async control(
@@ -473,6 +500,21 @@ export class DecisionEngine {
         call.error = safeError(error)
         event(run, "call_failed", `${phase} · ${seatId}：${call.error}`)
       })
+      const failed = this.store.get(id)
+      const attempts = failed.calls.filter(call => call.key === key).length
+      if (
+        retryableOutputError(error) &&
+        !controller.signal.aborted &&
+        failed.status === "running" &&
+        failed.epoch === epoch &&
+        attempts < 3
+      ) {
+        await this.store.update(id, run => {
+          event(run, "call_retry", `${phase} · ${seatId} 输出校验失败，自动进行第 ${attempts + 1} 次尝试`)
+        })
+        await this.callReserved(id, epoch, phase, seatId, modelKey, controller)
+        return
+      }
       await this.pauseForError(id, epoch, safeError(error))
     }
   }
@@ -624,16 +666,44 @@ export class DecisionEngine {
             )?.result,
           )
           const order = result.priorityIssueIds
-          draft.issues.sort(
-            (a, b) =>
-              (order.indexOf(a.id) < 0 ? 999 : order.indexOf(a.id)) -
-              (order.indexOf(b.id) < 0 ? 999 : order.indexOf(b.id)),
+          const sourceIssues = new Map(draft.issues.map(issue => [issue.id, issue]))
+          draft.issues = result.issueGroups
+            .map(group => {
+              const members = group.memberIssueIds.map(issueId => sourceIssues.get(issueId)!)
+              const canonical = [...members].sort(
+                (a, b) =>
+                  SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || order.indexOf(a.id) - order.indexOf(b.id),
+              )[0]!
+              return {
+                ...canonical,
+                title: group.title,
+                severity: members.reduce(
+                  (severity, issue) =>
+                    SEVERITY_RANK[issue.severity] > SEVERITY_RANK[severity] ? issue.severity : severity,
+                  canonical.severity,
+                ),
+                rationale: mergedIssueText(members, "rationale"),
+                evidenceIds: [...new Set(members.flatMap(issue => issue.evidenceIds))],
+                suggestedChange: mergedIssueText(members, "suggestedChange"),
+                whatWouldChangeMind: mergedIssueText(members, "whatWouldChangeMind"),
+                sourceIssueIds: group.memberIssueIds,
+              }
+            })
+            .sort(
+              (a, b) =>
+                Math.min(...a.sourceIssueIds.map(issueId => order.indexOf(issueId))) -
+                Math.min(...b.sourceIssueIds.map(issueId => order.indexOf(issueId))),
+            )
+          event(
+            draft,
+            "issues_grouped",
+            `Host 将 ${sourceIssues.size} 条独立首评问题归并为 ${draft.issues.length} 个议题簇；原始首评保持不变`,
           )
           draft.round = 1
           draft.phase = draft.finishRequested ? "revise" : "discuss"
         })
       } else if (run.phase === "discuss") {
-        if (run.finishRequested || run.calls.length + run.config.seats.length + 2 > run.config.limits.maxCalls) {
+        if (run.finishRequested || run.calls.length + run.config.seats.length + 3 > run.config.limits.maxCalls) {
           await this.advance(id, epoch, draft => {
             draft.phase = "revise"
             event(
@@ -646,50 +716,37 @@ export class DecisionEngine {
         }
         await this.seats(id, epoch, "discuss", controller)
         await this.advance(id, epoch, draft => {
-          const current = draft.calls
-            .filter(
-              call =>
-                call.purpose !== "compaction" &&
-                call.phase === "discuss" &&
-                call.round === draft.round &&
-                call.status === "succeeded",
-            )
-            .map(call => debateSchema.parse(call.result))
-          const previous = draft.calls
-            .filter(
-              call =>
-                call.purpose !== "compaction" &&
-                call.phase === "discuss" &&
-                call.round === draft.round - 1 &&
-                call.status === "succeeded",
-            )
-            .map(call => debateSchema.parse(call.result))
-          const allNeedEvidence = current.every(item =>
-            item.responses.every(response => response.position === "needs_evidence"),
-          )
-          const noFurther = current.every(item => !item.continueDiscussion)
-          const repeated = previous.length > 0 && hash(JSON.stringify(current)) === hash(JSON.stringify(previous))
-          const closingCalls = draft.calls.length + draft.config.seats.length + 2 > draft.config.limits.maxCalls
-          if (
-            draft.finishRequested ||
-            noFurther ||
-            allNeedEvidence ||
-            repeated ||
-            closingCalls ||
-            draft.round >= draft.config.limits.maxRounds
-          ) {
+          draft.phase = "interpret"
+          event(draft, "ballot_ready", `第 ${draft.round} 轮表决已聚合，等待主持解读`)
+        })
+      } else if (run.phase === "interpret") {
+        await this.call(id, epoch, "interpret", "moderator", run.config.moderatorKey, controller)
+        await this.advance(id, epoch, draft => {
+          const assessment = assessDeliberation(draft)
+          const softClosed =
+            assessment.coverageSatisfied &&
+            assessment.unreviewedCriticalBlockerIds.length === 0 &&
+            (assessment.allNeedEvidence ||
+              (assessment.stableBallots && assessment.noNewInformation && assessment.noFurtherDiscussion))
+          const closingCalls = draft.calls.length + draft.config.seats.length + 3 > draft.config.limits.maxCalls
+          if (draft.finishRequested || softClosed || closingCalls || draft.round >= draft.config.limits.maxRounds) {
             draft.phase = "revise"
             event(
               draft,
               "discussion_closed",
-              allNeedEvidence
-                ? "继续讨论需要新证据；保留缺口并生成修订稿"
+              assessment.allNeedEvidence && assessment.coverageSatisfied
+                ? "各问题已达到所需独立覆盖，继续讨论需要新证据；保留缺口并生成修订稿"
                 : closingCalls
                   ? "预留最后两次调用用于修订与复核"
-                  : "已达到讨论终止条件，转入修订；不以多数投票宣布事实成立",
+                  : softClosed
+                    ? "问题覆盖充分且连续两轮票型稳定、没有新增信息，转入修订；投票不用于宣布事实成立"
+                    : draft.round >= draft.config.limits.maxRounds
+                      ? "已达到讨论轮数上限，保留票型与异议并转入修订"
+                      : "按人工指令进入修订",
             )
           } else {
             draft.round += 1
+            draft.phase = "discuss"
           }
         })
       } else if (run.phase === "revise") {

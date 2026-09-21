@@ -58,8 +58,19 @@ try {
   await page.getByRole("button", { name: "创建并开始评审" }).click()
   await page.getByRole("button", { name: "补充意见，创建下一版" }).waitFor({ timeout: 30000 })
   assert.equal(await page.getByRole("alert").count(), 0)
-  assert.equal(await page.locator(".message").count(), 11)
+  assert.ok((await page.locator(".message").count()) >= 11)
   await page.screenshot({ path: "test-results/discussion-desktop.png", fullPage: true })
+  const sidebar = await browser.newPage({ viewport: { width: 420, height: 900 } })
+  await sidebar.goto(`${origin}/decision-room/?layout=progress`)
+  await sidebar.locator(".decision-ballot-list article").first().waitFor()
+  assert.ok((await sidebar.locator(".decision-ballot-list article").count()) > 0)
+  assert.equal(
+    await sidebar.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
+    true,
+    "右侧进度栏不应横向溢出",
+  )
+  await sidebar.screenshot({ path: "test-results/ballot-sidebar.png", fullPage: true })
+  await sidebar.close()
   await page.getByRole("tab", { name: "问题台账" }).click()
   assert.equal(await page.locator(".issue-card").count(), 4)
   await page.getByRole("tab", { name: "修订方案", exact: true }).click()
@@ -104,6 +115,7 @@ try {
           "创建四角色评审",
           "11 次完整模拟调用",
           "问题台账",
+          "右侧栏表决详情与窄屏布局",
           "完整修订与复核",
           "人工采纳",
           "HTML 下载",

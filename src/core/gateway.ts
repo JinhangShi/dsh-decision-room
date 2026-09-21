@@ -1,4 +1,5 @@
 import type { Model } from "./models.js"
+import { acceptsReturnedModel } from "./model-identity.js"
 import { DecisionError, type Phase, type Run, type Usage } from "./schema.js"
 
 export type WireMessage = { role: "user" | "assistant"; content: string }
@@ -207,7 +208,7 @@ export class HttpGateway implements ModelGateway {
     if (payload.error) {
       throw new GatewayError("UPSTREAM_ERROR", "网关返回了错误状态，未将其计为成功评审", result)
     }
-    if (returnedModel && returnedModel !== model.model) {
+    if (returnedModel && !acceptsReturnedModel(model.model, returnedModel)) {
       throw new GatewayError(
         "MODEL_MISMATCH",
         `模型身份不一致：请求 ${model.model}，返回 ${returnedModel}。已停止本次评审，请先确认网关映射`,

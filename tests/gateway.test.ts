@@ -54,6 +54,62 @@ describe("模型协议与身份检查", () => {
       response: { returnedModel: "other", usage: { totalTokens: 33 } },
     })
   })
+  it.each(["deepseek-v4.1-flash", "deepseek-v4-1-flash-260910"])(
+    "接受 DeepSeek 已知返回标识 %s，保留实际身份和用量，请求路由不变",
+    async returnedModel => {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            model: returnedModel,
+            choices: [{ message: { content: "{}" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 11, completion_tokens: 22 },
+          }),
+        ),
+      )
+      const model = DEFAULT_MODELS.find(item => item.key === "deepseek")!
+      const response = await new HttpGateway(env, fetcher).generate({ ...request(), model })
+      expect(response).toEqual({
+        text: "{}",
+        returnedModel,
+        usage: { inputTokens: 11, outputTokens: 22, totalTokens: 33 },
+      })
+      expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).model).toBe("deepseek-v4.1-flash")
+    },
+  )
+  it.each(["deepseek-v4-1-flash-260911", "deepseek-v4-pro-20260813", "deepseek-v4-flash-20260731", "other-model"])(
+    "拒绝未知版本或其他模型 %s，不按前缀、日期或系列名宽松匹配",
+    async returnedModel => {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            model: returnedModel,
+            choices: [{ message: { content: "{}" } }],
+            usage: { prompt_tokens: 11, completion_tokens: 22 },
+          }),
+        ),
+      )
+      await expect(
+        new HttpGateway(env, fetcher).generate({
+          ...request(),
+          model: DEFAULT_MODELS.find(item => item.key === "deepseek")!,
+        }),
+      ).rejects.toMatchObject({
+        code: "MODEL_MISMATCH",
+        response: { returnedModel, usage: { totalTokens: 33 } },
+      })
+    },
+  )
+  it("DeepSeek 版本标识不能被另一个请求模型复用", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          model: "deepseek-v4-1-flash-260910",
+          choices: [{ message: { content: "{}" } }],
+        }),
+      ),
+    )
+    await expect(new HttpGateway(env, fetcher).generate(request())).rejects.toMatchObject({ code: "MODEL_MISMATCH" })
+  })
   it("HTTP 200 的上游错误和截断输出都不能伪装成成功", async () => {
     const fetcher = vi
       .fn<typeof fetch>()

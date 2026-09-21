@@ -76,39 +76,5 @@
         "type": "disabled"
       }
     }
-  },
-  {
-    "key": "openai",
-    "label": "OpenAI（待接通）",
-    "family": "OpenAI",
-    "model": "gpt-4o",
-    "transport": "chat",
-    "baseUrlEnv": "AI_GATEWAY_BASE_URL",
-    "apiKeyEnv": "AI_GATEWAY_API_KEY",
-    "enabled": false,
-    "availability": "unavailable",
-    "note": "当前参考网关返回 404，需要获授权的模型 ID 和入口。",
-    "inputCnyPerMillion": null,
-    "outputCnyPerMillion": null,
-    "contextTokens": 64000,
-    "outputParameter": "max_tokens",
-    "extraBody": {}
-  },
-  {
-    "key": "claude",
-    "label": "Claude（待接通）",
-    "family": "Claude",
-    "model": "claude-sonnet-4-5",
-    "transport": "chat",
-    "baseUrlEnv": "AI_GATEWAY_BASE_URL",
-    "apiKeyEnv": "AI_GATEWAY_API_KEY",
-    "enabled": false,
-    "availability": "unavailable",
-    "note": "当前参考网关返回 404，需要获授权的模型 ID 和入口。",
-    "inputCnyPerMillion": null,
-    "outputCnyPerMillion": null,
-    "contextTokens": 64000,
-    "outputParameter": "max_tokens",
-    "extraBody": {}
   }
 ]

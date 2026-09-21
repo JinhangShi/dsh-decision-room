@@ -9,5 +9,6 @@ coverage/
 .decision-room/
 *.tgz
 .DS_Store
+.idea/
 playwright-report/
 test-results/

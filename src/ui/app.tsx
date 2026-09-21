@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react"
 import { activeElapsed, spent } from "../core/budget.js"
+import { assessDeliberation } from "../core/deliberation.js"
 import type { Model } from "../core/models.js"
 import {
   DEFAULT_LIMITS,
   DEFAULT_SEATS,
+  REVIEW_MODES,
+  SEAT_TEMPLATES,
+  reviewModeForLimits,
   type Brief,
   type Call,
   type Run,
@@ -13,11 +17,12 @@ import {
 import { Api, type Bootstrap } from "./api.js"
 import "./style.css"
 
-const PHASES = ["independent", "organize", "discuss", "revise", "verify", "finished"] as const
+const PHASES = ["independent", "organize", "discuss", "interpret", "revise", "verify", "finished"] as const
 const PHASE_LABEL = {
   independent: "独立评审",
   organize: "整理问题",
   discuss: "交叉讨论",
+  interpret: "主持解读",
   revise: "修订方案",
   verify: "独立复核",
   finished: "等待人工决策",
@@ -39,7 +44,7 @@ export const EMPTY_BRIEF: Brief = {
   sources: [],
 }
 const DEFAULT_CONFIG: RunConfig = {
-  seats: DEFAULT_SEATS,
+  seats: structuredClone(DEFAULT_SEATS),
   moderatorKey: "qwen",
   verifierKey: "kimi",
   limits: DEFAULT_LIMITS,
@@ -67,67 +72,15 @@ function ModelSelect({
     <label className="field">
       <span>{label}</span>
       <select value={value} onChange={event => onChange(event.target.value)}>
-        {models.map(model => (
-          <option key={model.key} value={model.key} disabled={!model.enabled}>
-            {model.label}
-            {model.enabled ? "" : " · 未接通"}
-          </option>
-        ))}
+        {models
+          .filter(model => model.enabled)
+          .map(model => (
+            <option key={model.key} value={model.key}>
+              {model.label}
+            </option>
+          ))}
       </select>
     </label>
-  )
-}
-function BudgetFields({
-  config,
-  onChange,
-}: {
-  config: RunConfig["limits"]
-  onChange(value: RunConfig["limits"]): void
-}): JSX.Element {
-  const fields = [
-    ["maxDurationMinutes", "最长讨论时间（分钟）", 1, 480],
-    ["maxRounds", "最多交叉讨论轮数", 1, 80],
-    ["maxCalls", "模型调用上限", 8, 400],
-    ["tokenBudget", "Token 总预算", 2000, 20000000],
-    ["concurrency", "同时发言席位", 1, 4],
-    ["outputTokens", "单次输出上限", 512, 16000],
-    ["callTimeoutSeconds", "单次超时（秒）", 5, 300],
-  ] as const
-  return (
-    <>
-      <div className="form-grid">
-        {fields.map(([key, label, min, max]) => (
-          <label className="field" key={key}>
-            <span>{label}</span>
-            <input
-              type="number"
-              min={min}
-              max={max}
-              required
-              value={config[key]}
-              onChange={event => onChange({ ...config, [key]: Number(event.target.value) })}
-            />
-          </label>
-        ))}
-        <label className="field">
-          <span>金额预算（元，可留空）</span>
-          <input
-            type="number"
-            min="0.01"
-            step="0.01"
-            placeholder="先在模型配置中填写真实价格"
-            value={config.maxCostCny ?? ""}
-            onChange={event =>
-              onChange({ ...config, maxCostCny: event.target.value === "" ? null : Number(event.target.value) })
-            }
-          />
-        </label>
-      </div>
-      <p className="hint">
-        金额留空时，使用
-        Token、次数和时间额度控制。缺少价格或用量时显示“未核定”，不会虚构费用。预留是保守估算，上游账单仍需核对。
-      </p>
-    </>
   )
 }
 export function BriefForm({
@@ -149,6 +102,18 @@ export function BriefForm({
 }): JSX.Element {
   const [brief, setBrief] = useState(initialBrief)
   const [config, setConfig] = useState(initialConfig)
+  const [reviewModeId, setReviewModeId] = useState(
+    reviewModeForLimits(initialConfig.limits)?.id ??
+      REVIEW_MODES.find(mode => mode.limits.maxDurationMinutes === initialConfig.limits.maxDurationMinutes)?.id ??
+      "standard",
+  )
+  const [templateId, setTemplateId] = useState(
+    SEAT_TEMPLATES.find(
+      template =>
+        template.seats.length === initialConfig.seats.length &&
+        template.seats.every((seat, index) => seat.id === initialConfig.seats[index]?.id),
+    )?.id ?? "custom",
+  )
   useEffect(() => {
     onDraftChange?.(brief, config)
   }, [brief, config, onDraftChange])
@@ -156,6 +121,49 @@ export function BriefForm({
   const [tab, setTab] = useState("brief")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const applyTemplate = (id: string) => {
+    const template = SEAT_TEMPLATES.find(item => item.id === id)
+    if (!template) return
+    const enabled = models.filter(model => model.enabled)
+    setTemplateId(id)
+    setConfig(value => ({
+      ...value,
+      seats: template.seats.map((seat, index) => ({
+        ...seat,
+        modelKey:
+          enabled.find(model => model.key === seat.modelKey)?.key ??
+          enabled[index % Math.max(enabled.length, 1)]?.key ??
+          seat.modelKey,
+      })),
+    }))
+  }
+  const addSeat = () => {
+    if (config.seats.length >= 6) return
+    const modelKey = models.find(model => model.enabled)?.key ?? "qwen"
+    setTemplateId("custom")
+    setConfig(value => ({
+      ...value,
+      seats: [
+        ...value.seats,
+        {
+          id: `custom-${crypto.randomUUID().slice(0, 8)}`,
+          name: "领域专家",
+          mandate: "审查与本议题相关的专业假设、约束、证据缺口和可执行修改。",
+          modelKey,
+          perspective: "domain",
+        },
+      ],
+    }))
+  }
+  const perspectives = new Set(config.seats.map(seat => seat.perspective))
+  const missingPerspectives = [
+    ["delivery", "交付视角"],
+    ["risk", "风险视角"],
+    ["challenge", "独立反方"],
+  ].filter(([key]) => !perspectives.has(key as NonNullable<(typeof config.seats)[number]["perspective"]>))
+  const selectedFamilies = new Set(
+    config.seats.map(seat => models.find(model => model.key === seat.modelKey)?.family ?? seat.modelKey),
+  )
   const upload = async (file?: File) => {
     if (!file) {
       return
@@ -220,7 +228,7 @@ export function BriefForm({
           <h2>{parent ? "加入反馈，开启下一版" : "把一个值得讨论的问题放上桌"}</h2>
           <p>先约定目标与边界，再让不同角色独立判断。</p>
         </div>
-        <span className="badge neutral">{parent ? "保留旧版" : "四席评审"}</span>
+        <span className="badge neutral">{parent ? "保留旧版" : `${config.seats.length} 席评审`}</span>
       </div>
       <div className="tabs" role="tablist">
         <button
@@ -353,121 +361,153 @@ export function BriefForm({
         </div>
       ) : (
         <div className="form-body">
-          <div className="role-grid">
-            {config.seats.map((seat, index) => (
-              <section key={seat.id} className="role-card">
-                <div className={`avatar color-${index}`}>{String(index + 1).padStart(2, "0")}</div>
-                <label className="field">
-                  <span>角色名称</span>
-                  <input
-                    value={seat.name}
-                    onChange={event =>
-                      setConfig({
-                        ...config,
-                        seats: config.seats.map(item =>
-                          item.id === seat.id ? { ...item, name: event.target.value } : item,
-                        ),
-                      })
-                    }
-                  />
-                </label>
-                <ModelSelect
-                  label="评审模型"
-                  models={models}
-                  value={seat.modelKey}
-                  onChange={modelKey =>
-                    setConfig({
-                      ...config,
-                      seats: config.seats.map(item => (item.id === seat.id ? { ...item, modelKey } : item)),
-                    })
-                  }
-                />
-                <label className="field">
-                  <span>职责与评价尺度</span>
-                  <textarea
-                    rows={3}
-                    value={seat.mandate}
-                    onChange={event =>
-                      setConfig({
-                        ...config,
-                        seats: config.seats.map(item =>
-                          item.id === seat.id ? { ...item, mandate: event.target.value } : item,
-                        ),
-                      })
-                    }
-                  />
-                </label>
-              </section>
-            ))}
+          <div className="template-picker">
+            <label className="field">
+              <span>评审模板</span>
+              <select value={templateId} onChange={event => applyTemplate(event.target.value)}>
+                {SEAT_TEMPLATES.map(template => (
+                  <option key={template.id} value={template.id}>
+                    {template.name} · {template.seats.length} 席
+                  </option>
+                ))}
+                {templateId === "custom" && <option value="custom">自定义</option>}
+              </select>
+            </label>
+            <p className="hint">
+              {SEAT_TEMPLATES.find(template => template.id === templateId)?.description ??
+                "已自定义席位。模板不会限制后续编辑。"}
+            </p>
           </div>
-          {new Set(config.seats.map(seat => seat.modelKey)).size < config.seats.length && (
-            <div className="notice">部分角色使用相同模型。同模型多角色有助于切换视角，但不构成多个独立模型。</div>
+          <details className="advanced-members" open={templateId === "custom"}>
+            <summary>高级设置 · 自定义席位</summary>
+            <div className="role-grid">
+              {config.seats.map((seat, index) => (
+                <section key={seat.id} className="role-card">
+                  <div className={`avatar color-${index}`}>{String(index + 1).padStart(2, "0")}</div>
+                  <div className="inline-between">
+                    <span className="hint">席位 {seat.id}</span>
+                    <button
+                      type="button"
+                      className="text-button"
+                      disabled={config.seats.length <= 2}
+                      onClick={() => {
+                        setTemplateId("custom")
+                        setConfig({ ...config, seats: config.seats.filter(item => item.id !== seat.id) })
+                      }}
+                    >
+                      移除
+                    </button>
+                  </div>
+                  <label className="field">
+                    <span>角色名称</span>
+                    <input
+                      value={seat.name}
+                      onChange={event => {
+                        setTemplateId("custom")
+                        setConfig({
+                          ...config,
+                          seats: config.seats.map(item =>
+                            item.id === seat.id ? { ...item, name: event.target.value } : item,
+                          ),
+                        })
+                      }}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>评审视角</span>
+                    <select
+                      value={seat.perspective ?? "domain"}
+                      onChange={event => {
+                        setTemplateId("custom")
+                        setConfig({
+                          ...config,
+                          seats: config.seats.map(item =>
+                            item.id === seat.id
+                              ? { ...item, perspective: event.target.value as NonNullable<typeof item.perspective> }
+                              : item,
+                          ),
+                        })
+                      }}
+                    >
+                      <option value="business">商业/用户价值</option>
+                      <option value="delivery">产品与交付</option>
+                      <option value="risk">财务/风险/合规</option>
+                      <option value="challenge">独立反方</option>
+                      <option value="domain">领域专家</option>
+                    </select>
+                  </label>
+                  <ModelSelect
+                    label="评审模型"
+                    models={models}
+                    value={seat.modelKey}
+                    onChange={modelKey => {
+                      setTemplateId("custom")
+                      setConfig({
+                        ...config,
+                        seats: config.seats.map(item => (item.id === seat.id ? { ...item, modelKey } : item)),
+                      })
+                    }}
+                  />
+                  <label className="field">
+                    <span>职责与评价尺度</span>
+                    <textarea
+                      rows={3}
+                      value={seat.mandate}
+                      onChange={event => {
+                        setTemplateId("custom")
+                        setConfig({
+                          ...config,
+                          seats: config.seats.map(item =>
+                            item.id === seat.id ? { ...item, mandate: event.target.value } : item,
+                          ),
+                        })
+                      }}
+                    />
+                  </label>
+                </section>
+              ))}
+            </div>
+            <button type="button" className="secondary" disabled={config.seats.length >= 6} onClick={addSeat}>
+              ＋ 添加领域席位（最多 6 席）
+            </button>
+          </details>
+          {missingPerspectives.length > 0 && (
+            <div className="notice error">
+              缺少{missingPerspectives.map(([, label]) => label).join("、")}。可以继续编辑，但不建议启动高风险评审。
+            </div>
           )}
-          <div className="form-grid">
-            <ModelSelect
-              label="主持与方案编辑"
-              models={models}
-              value={config.moderatorKey}
-              onChange={moderatorKey => setConfig({ ...config, moderatorKey })}
-            />
-            <ModelSelect
-              label="最终独立复核"
-              models={models}
-              value={config.verifierKey}
-              onChange={verifierKey => setConfig({ ...config, verifierKey })}
-            />
-          </div>
-          <h3>讨论时长与预算</h3>
-          <div className="preset-row">
-            {[
-              { label: "快速评审 · 15 分钟", minutes: 15, rounds: 2, calls: 24 },
-              { label: "深入讨论 · 1 小时", minutes: 60, rounds: 12, calls: 64 },
-              { label: "持续推敲 · 4 小时", minutes: 240, rounds: 24, calls: 120 },
-            ].map(preset => (
+          {selectedFamilies.size < 2 && (
+            <div className="notice error">当前只有一个模型族，无法形成跨模型族的独立覆盖。</div>
+          )}
+          {selectedFamilies.size < config.seats.length && (
+            <div className="notice">部分角色使用相同模型族。多角色可切换视角，但不会被 Host 算作多个独立模型族。</div>
+          )}
+          <h3>评审模式</h3>
+          <div className="review-mode-picker" role="radiogroup" aria-label="评审模式">
+            {REVIEW_MODES.map(mode => (
               <button
                 type="button"
-                className="secondary"
-                key={preset.minutes}
-                onClick={() =>
+                role="radio"
+                aria-checked={reviewModeId === mode.id}
+                className={reviewModeId === mode.id ? "selected" : ""}
+                key={mode.id}
+                onClick={() => {
+                  setReviewModeId(mode.id)
                   setConfig({
                     ...config,
-                    limits: {
-                      ...config.limits,
-                      maxDurationMinutes: preset.minutes,
-                      maxRounds: preset.rounds,
-                      maxCalls: preset.calls,
-                    },
+                    limits: structuredClone(mode.limits),
                   })
-                }
+                }}
               >
-                {preset.label}
+                <strong>{mode.label}</strong>
+                <span>{mode.duration}</span>
               </button>
             ))}
           </div>
-          <BudgetFields config={config.limits} onChange={limits => setConfig({ ...config, limits })} />
-          <div className="notice">
-            讨论会在缺少新证据、没有后续争议或达到限制时结束。4
-            小时是上限，不会为耗满时间重复发言。首轮结论统一公开；后续分歧会保留到报告。
-          </div>
-          <details className="model-catalog">
-            <summary>模型接入状态与计价</summary>
-            {models.map(model => (
-              <div className="source-item" key={model.key}>
-                <div>
-                  <strong>{model.label}</strong>
-                  <p className="hint">
-                    {model.model} · {model.note}
-                  </p>
-                </div>
-                <span className={`badge ${model.enabled ? "good" : "neutral"}`}>
-                  {model.enabled ? "可配置" : "未接通"}
-                </span>
-              </div>
-            ))}
-            <p className="hint">
-              新增供应商、路由及真实价格在 Host 的 models.local.json 中配置。密钥保留在 Host 环境中。
-            </p>
-          </details>
+          <p className="mode-description">
+            {REVIEW_MODES.find(mode => mode.id === reviewModeId)?.description}
+            任务满足结束条件时会提前完成。
+          </p>
           <div className="form-footer">
             <button type="button" className="secondary" onClick={() => setTab("brief")}>
               ← 返回材料
@@ -497,7 +537,18 @@ function ResultContent({ call }: { call: Call }): JSX.Element | null {
         summary?: string
         strengths?: string[]
         issues?: Array<{ title?: string; rationale?: string; reason?: string; verdict?: string }>
-        responses?: Array<{ issueId: string; reasoning: string; proposedChange: string }>
+        responses?: Array<{
+          issueId: string
+          position?: string
+          evidenceStatus?: string
+          blocking?: boolean
+          reasoning: string
+          proposedChange: string
+        }>
+        headline?: string
+        changesSincePrevious?: string
+        nextStep?: string
+        caveat?: string
       }
     | undefined
   if (!result) {
@@ -516,6 +567,10 @@ function ResultContent({ call }: { call: Call }): JSX.Element | null {
   return (
     <>
       <p>{result.summary}</p>
+      {result.headline && <div className="strengths">主持解读：{result.headline}</div>}
+      {result.changesSincePrevious && <p className="hint">相比上一轮：{result.changesSincePrevious}</p>}
+      {result.nextStep && <p className="hint">下一步：{result.nextStep}</p>}
+      {result.caveat && <p className="hint">{result.caveat}</p>}
       {result.strengths?.length ? <div className="strengths">应保留：{result.strengths.join("；")}</div> : null}
       {result.issues?.map((issue, index) => (
         <p className="finding" key={index}>
@@ -525,6 +580,9 @@ function ResultContent({ call }: { call: Call }): JSX.Element | null {
       {result.responses?.map(response => (
         <div key={response.issueId} className="finding">
           <span className="issue-ref">{response.issueId}</span>
+          <span className={`badge ${response.blocking ? "warning" : "neutral"}`}>
+            {response.position ?? "历史意见"} · {response.evidenceStatus ?? "未记录证据状态"}
+          </span>
           <p>{response.reasoning}</p>
           <p className="hint">建议：{response.proposedChange}</p>
         </div>
@@ -545,7 +603,6 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
   const [busy, setBusy] = useState(false)
   const [now, setNow] = useState(Date.now())
   const [decisionReason, setDecisionReason] = useState("")
-  const [limits, setLimits] = useState<RunConfig["limits"] | null>(null)
   useEffect(() => {
     let active = true
     void api
@@ -631,17 +688,17 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
     setRun(null)
     setView("discussion")
     setFormKey(key => key + 1)
-    setLimits(null)
     setError("")
   }
   const metrics = run ? spent(run) : null
   const selectRun = async (item: Run) => {
     setRun(await api.request<Run>(`/runs/${item.id}`))
-    setLimits(null)
     setDecisionReason("")
     setParent(null)
   }
   const unresolved = run?.issues.filter(issue => issue.status !== "addressed").length ?? 0
+  const hasInterruptedCalls = run?.calls.some(call => call.status === "interrupted") ?? false
+  const deliberation = useMemo(() => (run ? assessDeliberation(run) : null), [run])
   const phaseIndex = run ? PHASES.indexOf(run.phase) : -1
   return (
     <div className={`decision-app ${sidebar ? "sidebar-mode" : ""}`}>
@@ -848,7 +905,94 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                   </div>
                 ))}
               </nav>
+              {deliberation && run.phase !== "independent" && (
+                <section className="ballot-overview" aria-labelledby="ballot-overview-title">
+                  <div className="section-heading">
+                    <div>
+                      <span className="eyebrow">Host 确定性聚合</span>
+                      <h2 id="ballot-overview-title">表决总览</h2>
+                      <p>逐问题显示覆盖、票型、证据状态和阻断票。多数意见不能把待核验判断变成事实。</p>
+                    </div>
+                    <span className={`badge ${deliberation.coverageSatisfied ? "good" : "warning"}`}>
+                      {deliberation.coverageSatisfied ? "覆盖达标" : "覆盖进行中"}
+                    </span>
+                  </div>
+                  <div className="ballot-legend">
+                    <span>
+                      <strong>独立覆盖</strong>：已投票席位／模型族与最低要求
+                    </span>
+                    <span>
+                      <strong>阻断票</strong>：认为问题未解决就不应推进
+                    </span>
+                    <span>
+                      <strong>立场</strong>：维持判断、修改方案、否决、弃权或待补证
+                    </span>
+                    <span>
+                      <strong>证据</strong>：材料支持、冲突或缺失，不代表外部核验
+                    </span>
+                  </div>
+                  {deliberation.issues.length === 0 ? (
+                    <div className="empty-state">主持整理问题后开始显示表决。</div>
+                  ) : (
+                    <div className="ballot-grid">
+                      {deliberation.issues.map(ballot => {
+                        const issue = run.issues.find(item => item.id === ballot.issueId)!
+                        return (
+                          <article className="ballot-row" key={ballot.issueId} data-blocking={ballot.blockingVotes > 0}>
+                            <div className="ballot-title">
+                              <span className="issue-ref">{issue.id}</span>
+                              <strong>{issue.title}</strong>
+                              <span className="badge neutral">{issue.severity}</span>
+                              {(issue.sourceIssueIds?.length ?? 1) > 1 && (
+                                <span className="badge neutral">合并 {issue.sourceIssueIds!.length} 条首评</span>
+                              )}
+                            </div>
+                            <div className="ballot-coverage">
+                              <span>
+                                {ballot.reviewerCount} 席 · 最低 {ballot.requiredReviewers}
+                              </span>
+                              <span>
+                                {ballot.modelFamilyCount} 模型族 · 最低 {ballot.requiredModelFamilies}
+                              </span>
+                              <span className={ballot.blockingVotes ? "blocking" : ""}>
+                                阻断票 {ballot.blockingVotes}
+                              </span>
+                            </div>
+                            <div className="ballot-votes" aria-label={`${issue.title}的表决票型`}>
+                              <span>
+                                维持 <strong>{ballot.positions.maintain}</strong>
+                              </span>
+                              <span>
+                                修改 <strong>{ballot.positions.revise}</strong>
+                              </span>
+                              <span>
+                                否决 <strong>{ballot.positions.reject}</strong>
+                              </span>
+                              <span>
+                                弃权 <strong>{ballot.positions.abstain}</strong>
+                              </span>
+                              <span>
+                                待补证 <strong>{ballot.positions.needs_evidence}</strong>
+                              </span>
+                            </div>
+                            <div className="ballot-evidence">
+                              证据：支持 {ballot.evidence.supported} · 冲突 {ballot.evidence.conflicting} · 缺失{" "}
+                              {ballot.evidence.missing}
+                            </div>
+                          </article>
+                        )
+                      })}
+                    </div>
+                  )}
+                </section>
+              )}
               {run.stopReason && <div className="notice">{run.stopReason}</div>}
+              {run.status === "paused" && hasInterruptedCalls && (
+                <div className="notice recovery-notice" role="note">
+                  <strong>需要你确认后重试</strong>
+                  <p>为避免上游重复计费，中断或超时不会自动重试。点击“从检查点继续”后，只重试未完成步骤。</p>
+                </div>
+              )}
               {metrics && metrics.uncertain > 0 && (
                 <div className="notice">
                   {metrics.uncertain} 次调用的实际用量未确定，按预留额度计入；取消不保证上游停止计费。
@@ -899,11 +1043,6 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                     从检查点继续
                   </button>
                 )}
-                {["paused", "draft"].includes(run.status) && (
-                  <button className="secondary" onClick={() => setLimits(limits ? null : run.config.limits)}>
-                    调整时间与预算
-                  </button>
-                )}
                 {["running", "paused", "draft"].includes(run.status) && (
                   <button
                     className="text-button danger"
@@ -938,30 +1077,6 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                   导出 HTML
                 </button>
               </div>
-              {limits && (
-                <section className="panel">
-                  <h3>调整本轮授权额度</h3>
-                  <BudgetFields config={limits} onChange={setLimits} />
-                  <button
-                    className="primary"
-                    disabled={busy}
-                    onClick={() => {
-                      void perform(async () => {
-                        setRun(
-                          await api.request<Run>(`/runs/${run.id}/limits`, "PUT", {
-                            scope,
-                            revision: run.revision,
-                            limits,
-                          }),
-                        )
-                        setLimits(null)
-                      })
-                    }}
-                  >
-                    保存额度（保存后再继续）
-                  </button>
-                </section>
-              )}
               {sidebar ? (
                 <section className="panel">
                   <h3>评审成员进度</h3>
@@ -1161,6 +1276,30 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                           <h3>{issue.title}</h3>
                           <p>{issue.rationale}</p>
                           <dl>
+                            {(() => {
+                              const ballot = deliberation?.issues.find(item => item.issueId === issue.id)
+                              return ballot ? (
+                                <>
+                                  <dt>独立覆盖</dt>
+                                  <dd>
+                                    席位 {ballot.reviewerCount}/{ballot.requiredReviewers} · 模型族{" "}
+                                    {ballot.modelFamilyCount}/{ballot.requiredModelFamilies} · 阻断票{" "}
+                                    {ballot.blockingVotes}
+                                  </dd>
+                                  <dt>票型</dt>
+                                  <dd>
+                                    维持 {ballot.positions.maintain} · 修改 {ballot.positions.revise} · 否决{" "}
+                                    {ballot.positions.reject} · 弃权 {ballot.positions.abstain} · 待补证{" "}
+                                    {ballot.positions.needs_evidence}
+                                  </dd>
+                                  <dt>证据状态</dt>
+                                  <dd>
+                                    支持 {ballot.evidence.supported} · 冲突 {ballot.evidence.conflicting} · 缺失{" "}
+                                    {ballot.evidence.missing}
+                                  </dd>
+                                </>
+                              ) : null
+                            })()}
                             <dt>建议修改</dt>
                             <dd>{issue.suggestedChange}</dd>
                             <dt>改变意见的条件</dt>

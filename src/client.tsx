@@ -3,14 +3,14 @@ import { createPortal } from "react-dom"
 import { Button } from "@deepseek-ai/dsh-client-ui-primitives"
 import type { BetterSidebarService, TabComponentProps } from "dsh-better-sidebar/client/service"
 import {
-  DecisionChatMessage,
   DecisionProgressCard,
   decisionNodeDefinition,
   progressNodeDefinition,
   type ConversationEvents,
 } from "./chat-messages.js"
+import { DecisionChatMessage } from "./decision-chat-message.js"
 import { fillDecisionDraft, type ComposerInput } from "./composer.js"
-import { createSidebarReveal } from "./sidebar-reveal.js"
+import { createSidebarAutoOpen, createSidebarReveal } from "./sidebar-reveal.js"
 
 export const inject = ["slots", "sessions", "workspaces", "conversationEvents"] as const
 const PREFIX = "session-dsh-decision-room-"
@@ -245,22 +245,80 @@ function DecisionSidebar({
 }
 const CSS = `
 .decision-chat-actions button { margin: 4px; border: 1px solid var(--dsw-alias-border-l2,#dce4ef); color: inherit; background: transparent; padding: 6px 10px; border-radius: 7px; cursor: pointer; font: inherit; font-size: 12px; }
-.decision-progress { padding: 18px; margin: 18px 0; border: 1px solid var(--dsw-alias-border-l2,#dce4ef); border-radius: 12px; color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 1.7; }
+.decision-message-markdown { min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.decision-message-markdown[data-collapsed="true"] { max-height: 520px; overflow: hidden; }
+.decision-message-markdown>:first-child { margin-top: 0; }
+.decision-message-markdown>:last-child { margin-bottom: 0; }
+.decision-message-toggle { margin-top: 12px; padding: 6px 12px; border: 1px solid var(--dsw-alias-border-l2,#dce4ef); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: 12px; }
+.decision-message-toggle:hover { background: var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04)); }
+.decision-progress { padding: 18px; margin: 18px 0; border: 1px solid var(--dsw-alias-border-l2,#dce4ef); border-radius: 8px; color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 1.6; }
 .decision-progress header { display: flex; justify-content: space-between; gap: 12px; }
 .decision-progress header span { color: var(--dsw-alias-state-business-primary,#4777cd); }
 .decision-seats { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
 .decision-seats>div { border: 1px solid var(--dsw-alias-border-l2,#dce4ef); border-radius: 8px; padding: 10px; }
-.decision-seats small,.decision-seats span,.decision-call-list small { display: block; }
+.decision-seats small,.decision-seats span { display: block; }
 .decision-caption,.decision-progress small { opacity: .72; font-size: 12px; }
-.decision-call-list { list-style: none; padding: 0; max-height: 340px; overflow: auto; }
-.decision-call-list li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--dsw-alias-border-l2,#dce4ef); }
-.decision-call-list li>p { flex-basis: 100%; }
-.decision-call-list [data-call-status="running"] { color: var(--dsw-alias-state-business-primary,#4777cd); }
+.decision-ballot { margin-top: 14px; border-top: 1px solid var(--dsw-alias-border-l2,#dce4ef); }
+.decision-ballot>summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 2px; cursor: pointer; font-weight: 600; }
+.decision-ballot>summary small { font-weight: 400; text-align: right; }
+.decision-ballot-legend { padding: 2px 0 8px; color: var(--dsw-alias-label-secondary,#586273); font-size: 11px; line-height: 1.55; }
+.decision-ballot-legend p { margin: 3px 0; }
+.decision-limit-summary { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin:10px 0; }
+.decision-limit-summary span { padding:8px 10px; border:1px solid var(--dsw-alias-border-subtle,#d9dee7); background:var(--dsw-alias-bg-subtle,#f7f8fa); font-size:12px; }
+.decision-ballot-history { margin-top:14px; }
+.decision-ballot-history>h3 { margin:0 0 8px; font-size:14px; }
+.decision-ballot-history>details { border-top:1px solid var(--dsw-alias-border-subtle,#d9dee7); }
+.decision-ballot-history>details>summary { display:flex; justify-content:space-between; gap:8px; padding:10px 0; cursor:pointer; }
+.decision-ballot-interpretation { margin-bottom:10px; padding:10px; border-left:3px solid #24745d; background:#f1f8f5; color:#193f35; font-size:12px; line-height:1.55; }
+.decision-ballot-interpretation p { margin:5px 0; }
+.decision-ballot-interpretation small { color:#526b64; }
+.decision-recovery { display:grid; gap:4px; margin:10px 0; padding:10px 12px; border-left:3px solid #b7791f; background:#fff8e6; color:#5f430f; font-size:12px; line-height:1.55; }
+.decision-ballot-list { display: grid; gap: 8px; padding: 2px 0 8px; }
+.decision-ballot-list article { min-width: 0; padding: 10px 12px; border: 1px solid var(--dsw-alias-border-l2,#dce4ef); border-left: 3px solid #7b8798; border-radius: 6px; }
+.decision-ballot-list article[data-blocking="true"] { border-left-color: #b83a3a; background: color-mix(in srgb,#b83a3a 5%,transparent); }
+.decision-ballot-heading { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: baseline; gap: 8px; }
+.decision-ballot-heading>span { color: var(--dsw-alias-state-business-primary,#4777cd); font-weight: 700; }
+.decision-ballot-heading>strong { min-width: 0; overflow-wrap: anywhere; }
+.decision-ballot-coverage,.decision-ballot-votes { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.decision-ballot-coverage span { font-weight: 600; }
+.decision-ballot-votes span { padding: 2px 6px; border: 1px solid var(--dsw-alias-border-l2,#dce4ef); border-radius: 4px; background: var(--dsw-alias-bg-layer-1,rgba(0,0,0,.025)); }
+.decision-ballot-evidence { margin-top: 7px; color: var(--dsw-alias-label-secondary,#586273); font-size: 12px; overflow-wrap: anywhere; }
+.decision-call-history { margin-top: 14px; border-top: 1px solid var(--dsw-alias-border-l2,#dce4ef); }
+.decision-call-history>summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 2px; cursor: pointer; font-weight: 600; }
+.decision-call-history>summary small { font-weight: 400; }
+.decision-call-list { list-style: none; margin: 0; padding: 0; max-height: 460px; overflow: auto; border-top: 1px solid var(--dsw-alias-border-l2,#dce4ef); }
+.decision-call-list li { display: grid; grid-template-columns: 24px 24px minmax(0,1fr) minmax(72px,auto); align-items: start; gap: 10px; padding: 12px 4px; border-bottom: 1px solid var(--dsw-alias-border-l2,#dce4ef); }
+.decision-call-index { padding-top: 2px; color: var(--dsw-alias-label-tertiary,#7a8494); font-variant-numeric: tabular-nums; text-align: right; }
+.decision-call-mark { display: grid; place-items: center; width: 20px; height: 20px; margin-top: 1px; border: 1px solid currentColor; border-radius: 50%; font-size: 11px; font-weight: 700; line-height: 1; }
+.decision-call-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.decision-call-title>span { color: var(--dsw-alias-label-secondary,#586273); font-size: 12px; }
+.decision-call-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; color: var(--dsw-alias-label-tertiary,#7a8494); font-size: 12px; }
+.decision-call-main p { margin: 7px 0 0; padding: 7px 9px; border-left: 2px solid #c74444; background: color-mix(in srgb,#c74444 8%,transparent); color: var(--dsw-alias-label-primary); line-height: 1.5; }
+.decision-call-result { min-width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+.decision-call-result>* { display: block; }
+.decision-call-result strong { margin-top: 3px; line-height: 1.2; }
+.decision-call-status { font-size: 12px; font-weight: 600; }
+.decision-call-list [data-call-status="succeeded"] .decision-call-mark,.decision-call-list [data-call-status="succeeded"] .decision-call-status { color: #2f7d4a; }
+.decision-call-list [data-call-status="running"] .decision-call-mark,.decision-call-list [data-call-status="running"] .decision-call-status { color: var(--dsw-alias-state-business-primary,#4777cd); }
+.decision-call-list [data-call-status="failed"] .decision-call-mark,.decision-call-list [data-call-status="failed"] .decision-call-status { color: #b83a3a; }
+.decision-call-list [data-call-status="interrupted"] .decision-call-mark,.decision-call-list [data-call-status="interrupted"] .decision-call-status { color: #a76519; }
+@media (max-width:640px) { .decision-seats { grid-template-columns: 1fr; } .decision-ballot>summary { align-items: flex-start; } .decision-ballot-heading { grid-template-columns: auto minmax(0,1fr); } .decision-ballot-heading>small { grid-column: 2; } .decision-call-list li { grid-template-columns: 20px 20px minmax(0,1fr); gap: 8px; } .decision-call-result { grid-column: 3; display: flex; align-items: baseline; gap: 5px; min-width: 0; text-align: left; } .decision-call-result>* { display: inline; } }
 `
 export function apply(ctx: ClientContext): void {
   let active = true
   let sidebar: BetterSidebarService | undefined
   const reveal = createSidebarReveal()
+  const autoOpen = createSidebarAutoOpen(
+    TAB,
+    sessionId => {
+      try {
+        return { sessionId, cwd: workspaceFor(ctx, sessionId).path }
+      } catch {
+        return undefined
+      }
+    },
+    sessionId => reveal.request(sessionId),
+  )
   ctx.effect(() => {
     const style = document.createElement("style")
     style.textContent = CSS
@@ -268,6 +326,7 @@ export function apply(ctx: ClientContext): void {
     return () => {
       active = false
       reveal.dispose()
+      autoOpen.dispose()
       style.remove()
     }
   })
@@ -285,7 +344,10 @@ export function apply(ctx: ClientContext): void {
         name: "conversation.chat.node",
         id: "decision-room:progress",
         key: "decision-room-progress",
-        inject: sessionId => ({ request: (text: string) => fillDecisionDraft(inputFor(ctx, sessionId), text) }),
+        inject: sessionId => ({
+          request: (text: string) => fillDecisionDraft(inputFor(ctx, sessionId), text),
+          onRunning: (runId: string) => autoOpen.request(sessionId, runId),
+        }),
       },
       DecisionProgressCard,
     ),
@@ -312,7 +374,9 @@ export function apply(ctx: ClientContext): void {
         },
       })
       sidebar = service
+      const detachAutoOpen = autoOpen.attach(service)
       return () => {
+        detachAutoOpen()
         if (sidebar === service) {
           sidebar = undefined
         }
@@ -341,8 +405,7 @@ export function apply(ctx: ClientContext): void {
       (await ctx.sessions.create({ workspaceId: workspace.workspaceId, sessionId: `${PREFIX}${crypto.randomUUID()}` }))
     if (active && ctx.sessions.list.getSnapshot().current === before) {
       ctx.sessions.open(target)
-      sidebar.openTab({ type: TAB }, { sessionId: target })
-      reveal.request(target)
+      autoOpen.request(target, `launcher:${target}`)
     }
   }
   ctx.slots.inject("sidebar.footer.action", () =>

@@ -40,7 +40,7 @@ export class DemoGateway implements ModelGateway {
         issues: [
           {
             title: titles[input.role?.id ?? ""] ?? "需要验证关键假设",
-            kind: input.role?.id === "growth" ? "missing_evidence" : "design",
+            kind: ["growth", "business", "commercial"].includes(input.role?.id ?? "") ? "missing_evidence" : "design",
             severity: "high",
             rationale: "[演示] 材料中的关键前提尚不足以支持扩大投入。",
             evidenceIds: ["proposal"],
@@ -53,6 +53,7 @@ export class DemoGateway implements ModelGateway {
       result = {
         summary: "[演示] 将增长证据、交付依赖和停止条件作为本轮重点。",
         priorityIssueIds: (input.issues ?? []).map(issue => issue.id),
+        issueGroups: (input.issues ?? []).map(issue => ({ title: issue.id, memberIssueIds: [issue.id] })),
       }
     } else if (input.phase === "discuss") {
       result = {
@@ -61,10 +62,24 @@ export class DemoGateway implements ModelGateway {
         responses: (input.assignedIssueIds ?? []).map(issueId => ({
           issueId,
           position: "needs_evidence",
+          evidenceStatus: "missing",
+          blocking: false,
+          newInformation: false,
           reasoning: "现有材料不能证明业务假设，建议保留异议并试点取证。",
           evidenceIds: ["proposal"],
           proposedChange: "增加试点数据收集与停止机制。",
+          whatWouldChangeMind: "获得口径一致、可复查且不触及硬约束的试点数据。",
         })),
+      }
+    } else if (input.phase === "interpret") {
+      result = {
+        headline: "[演示] 当前不宜直接扩大投入",
+        decisionSignal: "conditional",
+        summary: "本轮多数问题仍需要补证，表决支持先缩小范围验证，而不是把方案视为已经通过。",
+        keyIssueIds: (input.issues ?? []).slice(0, 3).map(issue => issue.id),
+        changesSincePrevious: "本轮没有足以改变核心判断的新证据，主要变化是修改条件更具体。",
+        nextStep: "先补齐关键证据和停止条件，再由人决定是否进入有限试点。",
+        caveat: "这是对评审票型的解释，不是外部事实核验，也不替代人工决策。",
       }
     } else if (input.phase === "revise") {
       result = {
