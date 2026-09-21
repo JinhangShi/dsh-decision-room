@@ -405,7 +405,7 @@ export function apply(ctx: ClientContext): void {
       (await ctx.sessions.create({ workspaceId: workspace.workspaceId, sessionId: `${PREFIX}${crypto.randomUUID()}` }))
     if (active && ctx.sessions.list.getSnapshot().current === before) {
       ctx.sessions.open(target)
-      autoOpen.request(target, `launcher:${target}`)
+      autoOpen.open(target)
     }
   }
   ctx.slots.inject("sidebar.footer.action", () =>

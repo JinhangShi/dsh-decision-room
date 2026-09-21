@@ -104,4 +104,17 @@ describe("决策进度自动打开侧栏", () => {
     controller.request("session-1", "run-2")
     expect(opens).toBe(0)
   })
+
+  it("用户关闭标签后再次点击入口仍会重新打开", () => {
+    let opens = 0
+    const controller = createSidebarAutoOpen(
+      "decision-room",
+      sessionId => ({ sessionId }),
+      () => {},
+    )
+    controller.attach({ isTabEnabled: () => true, openTab: () => (opens += 1) })
+    controller.open("session-1")
+    controller.open("session-1")
+    expect(opens).toBe(2)
+  })
 })

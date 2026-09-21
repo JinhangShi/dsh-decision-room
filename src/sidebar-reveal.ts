@@ -72,17 +72,21 @@ export function createSidebarAutoOpen(
   let disposed = false
   const openedRuns = new Set<string>()
   const pendingRuns = new Map<string, string>()
+  const open = (sessionId: string): boolean => {
+    if (disposed || !service || !service.isTabEnabled(tabType)) return false
+    const scope = scopeFor(sessionId)
+    if (!scope) return false
+    service.openTab({ type: tabType }, scope)
+    requestReveal(sessionId)
+    return true
+  }
   const request = (sessionId: string, runId: string): void => {
     if (disposed || openedRuns.has(runId)) return
     if (!service) {
       pendingRuns.set(runId, sessionId)
       return
     }
-    if (!service.isTabEnabled(tabType)) return
-    const scope = scopeFor(sessionId)
-    if (!scope) return
-    service.openTab({ type: tabType }, scope)
-    requestReveal(sessionId)
+    if (!open(sessionId)) return
     openedRuns.add(runId)
     pendingRuns.delete(runId)
   }
@@ -95,6 +99,7 @@ export function createSidebarAutoOpen(
         if (service === next) service = undefined
       }
     },
+    open,
     request,
     dispose(): void {
       disposed = true
