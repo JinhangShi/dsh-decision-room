@@ -6,6 +6,7 @@ import { decisionProgress } from "../dsh/messages.js"
 import { DecisionProgressCard } from "../chat-messages.js"
 import { BriefForm, EMPTY_BRIEF } from "./app.js"
 import { Api, type Bootstrap } from "./api.js"
+import { Settings } from "./settings.js"
 
 // Drafts may be incomplete while typing; full validation still happens before a review starts.
 const draftSchema = z.object({
@@ -133,6 +134,16 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
       )}
       {!boot ? (
         <p>正在读取角色与预算配置…</p>
+      ) : !boot.gateway?.configured ? (
+        <Settings
+          scope={scope}
+          onSaved={() => {
+            void api
+              .bootstrap()
+              .then(setBoot)
+              .catch(cause => setError(cause instanceof Error ? cause.message : "读取配置失败"))
+          }}
+        />
       ) : progressOnly ? (
         <>
           <p className="notice">材料已发送。补充意见、暂停、继续及二次修订，请直接在主聊天完成。</p>

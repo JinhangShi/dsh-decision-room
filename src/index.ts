@@ -6,7 +6,12 @@ import { DshGateway, HttpGateway, RoutedGateway, type DshLlm } from "./core/gate
 import { briefSchema, limitsSchema, DecisionError, assertScope, type Scope } from "./core/schema.js"
 import { defaultConfiguration } from "./core/models.js"
 import { domainPersistence, RunStore, type StorageDomain } from "./core/store.js"
-import { applyGatewaySettings, gatewaySettingsSchema, loadConfiguration } from "./server/config.js"
+import {
+  applyGatewaySettings,
+  createGatewaySettingsStore,
+  gatewaySettingsSchema,
+  loadConfiguration,
+} from "./server/config.js"
 import { createRoutes, type WebServer } from "./server/routes.js"
 import { NativeGateway, type NativeServices } from "./dsh/native-gateway.js"
 import { DecisionTranscript } from "./dsh/transcript.js"
@@ -84,6 +89,8 @@ function executionScope(execution: Execution): Scope {
 export function apply(ctx: HostContext): void {
   const ready = (async () => {
     const configuration = await loadConfiguration()
+    const gatewaySettings = await createGatewaySettingsStore(configuration.env)
+    await gatewaySettings.load()
     const llm = ctx.get?.("llm") as DshLlm | undefined
     const store = new RunStore(await domainPersistence(ctx.storageDomain))
     const native =
@@ -136,6 +143,7 @@ export function apply(ctx: HostContext): void {
       stopContext,
       routes: createRoutes(engine, new URL("./web/", import.meta.url), {
         env: configuration.env,
+        settings: gatewaySettings,
         async test(input) {
           const settings = gatewaySettingsSchema.parse(input)
           const testEnv = { ...configuration.env }

@@ -87,6 +87,7 @@ export function createRoutes(
   gateway: {
     env: NodeJS.ProcessEnv
     test(input: unknown): Promise<{ returnedModel?: string; usage?: unknown }>
+    settings?: { save(input: unknown): Promise<void>; clear(): Promise<void> }
   } = {
     env: process.env,
     async test() {
@@ -142,11 +143,13 @@ export function createRoutes(
       }
       if (path === "/api/settings" && req.method === "PUT") {
         const input = gatewaySettingsSchema.parse(await body(req))
-        applyGatewaySettings(gateway.env, input)
+        if (gateway.settings) await gateway.settings.save(input)
+        else applyGatewaySettings(gateway.env, input)
         return send(res, 200, gatewaySettingsView(gateway.env))
       }
       if (path === "/api/settings" && req.method === "DELETE") {
-        clearGatewaySettings(gateway.env)
+        if (gateway.settings) await gateway.settings.clear()
+        else clearGatewaySettings(gateway.env)
         return send(res, 200, gatewaySettingsView(gateway.env))
       }
       if (path === "/api/settings/test" && req.method === "POST") {

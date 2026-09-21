@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react"
 import { Api, type Bootstrap } from "./api.js"
 
-export function Settings({ scope }: { scope: { sessionId: string; workspaceId: string } }): JSX.Element {
+export function Settings({
+  scope,
+  onSaved,
+}: {
+  scope: { sessionId: string; workspaceId: string }
+  onSaved?: () => void
+}): JSX.Element {
   const api = useMemo(() => new Api(scope), [scope.sessionId, scope.workspaceId])
   const [boot, setBoot] = useState<Bootstrap>()
   const [baseUrl, setBaseUrl] = useState("")
@@ -80,6 +86,7 @@ export function Settings({ scope }: { scope: { sessionId: string; workspaceId: s
                 await api.request("/settings", "PUT", { baseUrl, apiKey })
                 setApiKey("")
                 setBoot(value => (value ? { ...value, gateway: { configured: true, baseUrl } } : value))
+                onSaved?.()
               }, "已保存到当前 DSH 进程。")
             }
           >
