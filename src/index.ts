@@ -306,11 +306,12 @@ export function apply(ctx: HostContext): void {
       output,
       async execute(args, execution) {
         const input = controlSchema.parse(args)
-        const { engine } = await ready
+        const { engine, transcript } = await ready
         const scope = executionScope(execution)
         const run = engine.store.get(input.id)
         assertScope(run, scope)
         const updated = await engine.control(run.id, scope, input.action, run.revision)
+        await transcript?.idle()
         return { id: updated.id, status: updated.status, phase: updated.phase, stopReason: updated.stopReason }
       },
     })

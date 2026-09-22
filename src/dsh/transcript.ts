@@ -9,6 +9,7 @@ import { decisionMessages, decisionProgress } from "./messages.js"
 /** Persist role messages as native plugin conversation events; never impersonate a human or mutate the agent loop's turn counter. */
 export class DecisionTranscript {
   private pending = new Map<string, Promise<void>>()
+  private latest = new Map<string, Run>()
   private owned = new Map<string, AgentHandle>()
   private unsubscribe: () => void
   private closing = false
@@ -30,7 +31,9 @@ export class DecisionTranscript {
       return
     }
     const key = run.scope.sessionId
-    const task = (this.pending.get(key) ?? Promise.resolve()).catch(() => {}).then(() => this.publish(run))
+    this.latest.set(key, run)
+    if (this.pending.has(key)) return
+    const task = this.drain(key)
     this.pending.set(key, task)
     void task
       .catch(() => this.warn("决策室主聊天同步失败，原始评审已保存；请重新打开会话后刷新"))
@@ -39,6 +42,14 @@ export class DecisionTranscript {
           this.pending.delete(key)
         }
       })
+  }
+  private async drain(key: string): Promise<void> {
+    while (!this.closing) {
+      const run = this.latest.get(key)
+      if (!run) return
+      this.latest.delete(key)
+      await this.publish(run)
+    }
   }
   private async publish(run: Run): Promise<void> {
     if (run.status === "draft") {

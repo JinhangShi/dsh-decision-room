@@ -183,91 +183,198 @@ export function makePrompt(run: Run, phase: Phase, seatId: string): string {
     task: "在独立上下文中复核修订方案：issues 必须逐一覆盖全部问题 ID。审查约束遵守、修改覆盖、证据支持及未解决分歧。addressed 仅指方案设计已回应，不代表外部事实已证实。对缺证据的事实保留 needs_evidence，不因编辑采纳就默认通过。每项 verdict 只能填写 addressed、open、needs_evidence 之一，禁止 partial、accepted 等其他值：部分解决但仍有实质缺口用 open；依赖未取得的证据用 needs_evidence。",
   })
 }
-function assertIds(actual: string[], allowed: Set<string>, exact = false): void {
-  const unknown = [...new Set(actual.filter(value => !allowed.has(value)))]
-  const duplicates = [...new Set(actual.filter((value, index) => actual.indexOf(value) !== index))]
-  const missing = exact ? [...allowed].filter(value => !actual.includes(value)) : []
-  if (!unknown.length && !duplicates.length && !missing.length) return
-  const details = [
-    unknown.length ? `未知 ID：${unknown.join("、")}` : "",
-    duplicates.length ? `重复 ID：${duplicates.join("、")}` : "",
-    missing.length ? `缺失 ID：${missing.join("、")}` : "",
-  ].filter(Boolean)
-  throw new DecisionError("REFERENCES", `模型输出的问题／材料引用不合法（${details.join("；")}）`)
+type Loose = Record<string, unknown>
+function object(value: unknown): Loose {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Loose) : {}
+}
+function textValue(value: unknown, fallback: string, max = 2000): string {
+  const valueText = typeof value === "string" && value.trim() ? value.trim() : fallback
+  return valueText.slice(0, max)
+}
+function array(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+function textArray(value: unknown, max: number): string[] {
+  return array(value)
+    .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+    .slice(0, max)
+    .map(item => item.trim().slice(0, 2000))
+}
+function knownIds(value: unknown, allowed: Set<string>, max = 48): string[] {
+  return [
+    ...new Set(
+      array(value).filter((item): item is string => typeof item === "string" && allowed.has(item)),
+    ),
+  ].slice(0, max)
+}
+function choice<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === "string" && allowed.includes(value as T) ? (value as T) : fallback
+}
+function looseJson(value: string): { raw: Loose; narrative: string; structured: boolean } {
+  const narrative = value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")
+  try {
+    return { raw: object(JSON.parse(narrative)), narrative, structured: true }
+  } catch {
+    const start = narrative.indexOf("{")
+    const end = narrative.lastIndexOf("}")
+    if (start >= 0 && end > start) {
+      try {
+        return { raw: object(JSON.parse(narrative.slice(start, end + 1))), narrative, structured: true }
+      } catch {
+        // The narrative is preserved below as unstructured model output.
+      }
+    }
+    return { raw: {}, narrative, structured: false }
+  }
 }
 export function parseResult(text: string, run: Run, phase: Phase, seatId: string): CallResult {
-  let raw: unknown
-  try {
-    raw = JSON.parse(
-      text
-        .trim()
-        .replace(/^```(?:json)?\s*/i, "")
-        .replace(/\s*```$/, ""),
-    )
-  } catch {
-    throw new DecisionError("OUTPUT_JSON", "模型未返回有效的结构化评审；可在预算内重试")
-  }
-  const result = outputSchema(phase).safeParse(raw)
-  if (!result.success) {
-    throw new DecisionError(
-      "OUTPUT_SCHEMA",
-      `模型评审格式不完整（${result.error.issues
-        .slice(0, 3)
-        .map(issue => issue.path.join(".") || "根字段")
-        .join("、")}）；可在预算内重试`,
-    )
-  }
+  const { raw, narrative, structured } = looseJson(text)
+  const fallback = textValue(narrative, "模型未提供可读说明")
   const materials = new Set([
     "proposal",
     ...run.brief.sources.map(source => source.id),
     ...(run.feedback ? ["humanFeedback"] : []),
   ])
-  const issues = new Set(run.issues.map(issue => issue.id))
+  const issueIds = run.issues.map(issue => issue.id)
+  const issues = new Set(issueIds)
   if (phase === "independent") {
-    const value = reviewSchema.parse(result.data)
-    value.issues.forEach(issue => assertIds(issue.evidenceIds, materials))
-    return value
+    const normalizedIssues = array(raw.issues)
+      .slice(0, 8)
+      .map(item => object(item))
+      .map((item, index) => ({
+        title: textValue(item.title, `评审关注点 ${index + 1}`, 200),
+        kind: choice(item.kind, ["fact", "design", "tradeoff", "missing_evidence"] as const, "tradeoff"),
+        severity: choice(item.severity, ["low", "medium", "high", "critical"] as const, "medium"),
+        rationale: textValue(item.rationale, fallback),
+        evidenceIds: knownIds(item.evidenceIds, materials, 18),
+        suggestedChange: textValue(item.suggestedChange, "保留该观点，并在后续讨论中形成可执行修改。"),
+        whatWouldChangeMind: textValue(item.whatWouldChangeMind, "需要补充能够支持或反驳该观点的材料。"),
+      }))
+    if (!structured && normalizedIssues.length === 0) {
+      normalizedIssues.push({
+        title: "非结构化评审意见",
+        kind: "tradeoff",
+        severity: "medium",
+        rationale: fallback,
+        evidenceIds: [],
+        suggestedChange: "由其他席位结合该意见继续质询并提出修改。",
+        whatWouldChangeMind: "需要后续席位提供更明确的材料依据。",
+      })
+    }
+    return reviewSchema.parse({
+      summary: textValue(raw.summary, fallback),
+      strengths: textArray(raw.strengths, 8),
+      issues: normalizedIssues,
+    })
   }
   if (phase === "organize") {
-    const value = organizeSchema.parse(result.data)
-    assertIds(value.priorityIssueIds, issues, true)
-    assertIds(
-      value.issueGroups.flatMap(group => group.memberIssueIds),
-      issues,
-      true,
-    )
-    return value
+    const used = new Set<string>()
+    const groups = array(raw.issueGroups)
+      .map(item => object(item))
+      .map(item => {
+        const memberIssueIds = knownIds(item.memberIssueIds, issues).filter(id => !used.has(id))
+        memberIssueIds.forEach(id => used.add(id))
+        return { title: textValue(item.title, memberIssueIds[0] ?? "议题", 200), memberIssueIds }
+      })
+      .filter(group => group.memberIssueIds.length > 0)
+    for (const issue of run.issues.filter(item => !used.has(item.id))) {
+      groups.push({ title: issue.title, memberIssueIds: [issue.id] })
+    }
+    const priority = knownIds(raw.priorityIssueIds, issues)
+    return organizeSchema.parse({
+      summary: textValue(raw.summary, "Host 已保留全部首评问题，并按主持输出及原始顺序整理。"),
+      priorityIssueIds: [...priority, ...issueIds.filter(id => !priority.includes(id))],
+      issueGroups: groups,
+    })
   }
   if (phase === "discuss") {
-    const value = debateSchema.parse(result.data)
-    assertIds(
-      value.responses.map(item => item.issueId),
-      new Set(assignedIssues(run, seatId)),
-      true,
+    const assigned = assignedIssues(run, seatId)
+    const responses = new Map(
+      array(raw.responses)
+        .map(item => object(item))
+        .filter(item => typeof item.issueId === "string" && assigned.includes(item.issueId))
+        .map(item => [item.issueId as string, item]),
     )
-    value.responses.forEach(item => assertIds(item.evidenceIds, materials))
-    return value
+    return debateSchema.parse({
+      summary: textValue(raw.summary, fallback),
+      continueDiscussion: typeof raw.continueDiscussion === "boolean" ? raw.continueDiscussion : true,
+      responses: assigned.map(issueId => {
+        const item = responses.get(issueId) ?? {}
+        return {
+          issueId,
+          position: choice(item.position, ["maintain", "revise", "reject", "abstain", "needs_evidence"] as const, "abstain"),
+          evidenceStatus: choice(item.evidenceStatus, ["supported", "conflicting", "missing"] as const, "missing"),
+          blocking: typeof item.blocking === "boolean" ? item.blocking : false,
+          newInformation: typeof item.newInformation === "boolean" ? item.newInformation : false,
+          reasoning: textValue(item.reasoning, fallback),
+          evidenceIds: knownIds(item.evidenceIds, materials, 16),
+          proposedChange: textValue(item.proposedChange, "保留当前问题，交由后续讨论补充。"),
+          whatWouldChangeMind: textValue(item.whatWouldChangeMind, "需要补充相关材料或形成新的可执行方案。"),
+        }
+      }),
+    })
   }
   if (phase === "interpret") {
-    const value = ballotInterpretationSchema.parse(result.data)
-    assertIds(value.keyIssueIds, issues)
-    return value
+    return ballotInterpretationSchema.parse({
+      headline: textValue(raw.headline, "本轮意见已由 Host 聚合", 200),
+      decisionSignal: choice(raw.decisionSignal, ["proceed", "conditional", "hold", "mixed"] as const, "mixed"),
+      summary: textValue(raw.summary, fallback),
+      keyIssueIds: knownIds(raw.keyIssueIds, issues, 8),
+      changesSincePrevious: textValue(raw.changesSincePrevious, "本轮变化以 Host 表决快照为准。"),
+      nextStep: textValue(raw.nextStep, "继续讨论尚未充分覆盖的议题。"),
+      caveat: textValue(raw.caveat, "模型解读不构成外部事实核验。"),
+    })
   }
   if (phase === "revise") {
-    const value = revisionSchema.parse(result.data)
-    assertIds(
-      value.changes.map(item => item.issueId),
-      issues,
-      true,
+    const changes = new Map(
+      array(raw.changes)
+        .map(item => object(item))
+        .filter(item => typeof item.issueId === "string" && issues.has(item.issueId))
+        .map(item => [item.issueId as string, item]),
     )
-    return value
+    const fullPlan = textValue(raw.fullPlan, narrative, 60000)
+    return revisionSchema.parse({
+      summary: textValue(raw.summary, fallback),
+      recommendation: choice(raw.recommendation, ["pilot", "need_evidence", "hold"] as const, "need_evidence"),
+      fullPlan: fullPlan.length >= 80 ? fullPlan : `${fullPlan}\n\n该输出由 Host 降级保留，执行前需要人工结合原始材料、异议和硬约束进一步确认。`,
+      changes: issueIds.map(issueId => {
+        const item = changes.get(issueId) ?? {}
+        return {
+          issueId,
+          disposition: choice(item.disposition, ["accepted", "partial", "rejected"] as const, "partial"),
+          change: textValue(item.change, "保留该议题，等待人工结合完整方案取舍。"),
+          reason: textValue(item.reason, "模型未按协议提供完整映射，Host 未擅自宣布问题已解决。"),
+        }
+      }),
+      experiments: array(raw.experiments)
+        .slice(0, 12)
+        .map(item => object(item))
+        .map(item => ({
+          hypothesis: textValue(item.hypothesis, "验证修订方案中的关键假设。"),
+          method: textValue(item.method, "采用小范围、可逆方式验证。"),
+          metric: textValue(item.metric, "记录结果与原始基线的差异。"),
+          ownerRole: textValue(item.ownerRole, "由人工指定责任角色。"),
+          stopCondition: textValue(item.stopCondition, "触及既定硬约束或无法取得有效证据时停止。"),
+        })),
+    })
   }
-  const value = verificationSchema.parse(result.data)
-  assertIds(
-    value.issues.map(item => item.issueId),
-    issues,
-    true,
+  const verdicts = new Map(
+    array(raw.issues)
+      .map(item => object(item))
+      .filter(item => typeof item.issueId === "string" && issues.has(item.issueId))
+      .map(item => [item.issueId as string, item]),
   )
-  value.issues.forEach(item => assertIds(item.evidenceIds, materials))
-  return value
+  return verificationSchema.parse({
+    summary: textValue(raw.summary, fallback),
+    constraintViolations: textArray(raw.constraintViolations, 16),
+    issues: issueIds.map(issueId => {
+      const item = verdicts.get(issueId) ?? {}
+      return {
+        issueId,
+        verdict: choice(item.verdict, ["addressed", "open", "needs_evidence"] as const, "open"),
+        reason: textValue(item.reason, "复核输出不完整，Host 保守保留该问题。"),
+        evidenceIds: knownIds(item.evidenceIds, materials, 16),
+      }
+    }),
+  })
 }

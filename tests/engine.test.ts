@@ -104,7 +104,7 @@ describe("决策室完整流程", () => {
     expect(run.issues[0]?.rationale).toContain("[I-business-1]")
     expect(run.events.some(item => item.type === "issues_grouped")).toBe(true)
   })
-  it("复核格式失败后自动将错误反馈给同一步骤，保留失败记录并完成重试", async () => {
+  it("复核使用未知枚举时由 Host 保守归一化，不阻断任务", async () => {
     const demo = new DemoGateway(0)
     let verifyAttempts = 0
     const gateway: ModelGateway = {
@@ -115,27 +115,22 @@ describe("决策室完整流程", () => {
           return response
         }
         verifyAttempts += 1
-        if (verifyAttempts === 1) {
-          const invalid = JSON.parse(response.text)
-          invalid.issues[0].verdict = "partial"
-          return { ...response, text: JSON.stringify(invalid) }
-        }
-        expect(prompt.validationFeedback).toMatchObject({ previousAttempt: 1 })
-        expect(prompt.validationFeedback.error).toContain("issues.0.verdict")
-        expect(prompt.task).toContain("禁止 partial")
-        return response
+        const invalid = JSON.parse(response.text)
+        invalid.issues[0].verdict = "partial"
+        return { ...response, text: JSON.stringify(invalid) }
       },
     }
     const { engine } = await setup(gateway)
     const run = await complete(engine)
     expect(run.status).toBe("completed")
     const verificationCalls = run.calls.filter(call => call.phase === "verify")
-    expect(verificationCalls).toHaveLength(2)
-    expect(verificationCalls.map(call => call.status)).toEqual(["failed", "succeeded"])
-    expect(verificationCalls.map(call => call.attempt)).toEqual([1, 2])
-    expect(run.events.some(item => item.type === "call_retry")).toBe(true)
+    expect(verificationCalls).toHaveLength(1)
+    expect(verificationCalls[0]?.status).toBe("succeeded")
+    expect(verifyAttempts).toBe(1)
+    expect(run.verification?.issues[0]?.verdict).toBe("open")
+    expect(run.events.some(item => item.type === "call_retry")).toBe(false)
   })
-  it("修订实验遗漏停止条件时自动重试并反馈具体字段", async () => {
+  it("修订实验遗漏停止条件时由 Host 补充保守停止条件", async () => {
     const demo = new DemoGateway(0)
     let revisionAttempts = 0
     const gateway: ModelGateway = {
@@ -144,20 +139,17 @@ describe("决策室完整流程", () => {
         const prompt = JSON.parse(request.prompt)
         if (prompt.phase !== "revise") return response
         revisionAttempts += 1
-        if (revisionAttempts === 1) {
-          const invalid = JSON.parse(response.text)
-          delete invalid.experiments[0].stopCondition
-          return { ...response, text: JSON.stringify(invalid) }
-        }
-        expect(prompt.validationFeedback.error).toContain("experiments.0.stopCondition")
-        expect(prompt.task).toContain("不得省略 stopCondition")
-        return response
+        const invalid = JSON.parse(response.text)
+        delete invalid.experiments[0].stopCondition
+        return { ...response, text: JSON.stringify(invalid) }
       },
     }
     const { engine } = await setup(gateway)
     const run = await complete(engine)
     expect(run.status).toBe("completed")
-    expect(run.calls.filter(call => call.phase === "revise").map(call => call.status)).toEqual(["failed", "succeeded"])
+    expect(run.calls.filter(call => call.phase === "revise").map(call => call.status)).toEqual(["succeeded"])
+    expect(revisionAttempts).toBe(1)
+    expect(run.revisionResult?.experiments[0]?.stopCondition).toContain("硬约束")
   })
   it("首轮上下文不包含他人结论，首轮屏障也保护浏览器投影", async () => {
     const { engine } = await setup()
@@ -381,7 +373,7 @@ describe("持久化、并发额度与停止", () => {
     expect(spent(run).tokens).toBe(1234)
     expect(generate).not.toHaveBeenCalled()
   })
-  it("错误输出保留实际用量，最多重试三次", async () => {
+  it("非 JSON 输出作为自由意见保留，不因格式问题暂停或重复计费", async () => {
     const { engine } = await setup({
       async generate() {
         return { text: "不是 JSON", usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 } }
@@ -389,16 +381,12 @@ describe("持久化、并发额度与停止", () => {
     })
     const value = input()
     value.config.limits.concurrency = 1
-    let run = await complete(engine, value)
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await engine.control(run.id, run.scope, "resume", run.revision)
-      await engine.idle(run.id)
-      run = engine.store.get(run.id)
-    }
-    expect(run.status).toBe("paused")
-    expect(run.calls).toHaveLength(3)
-    expect(spent(run).tokens).toBe(450)
-    expect(run.stopReason).toContain("三次")
+    value.config.limits.maxRounds = 1
+    value.config.limits.maxCalls = 24
+    const run = await complete(engine, value)
+    expect(["completed", "paused"]).toContain(run.status)
+    expect(run.stopReason ?? "").not.toMatch(/格式|结构化评审|引用不合法/)
+    expect(spent(run).tokens).toBe(run.calls.length * 150)
   })
   it("模型身份不一致时停止，并计入已报告用量", async () => {
     const { engine } = await setup({
@@ -504,9 +492,13 @@ describe("作用域与人工决策", () => {
     expect(() =>
       parseResult(JSON.stringify(citedFeedback), next, "independent", next.config.seats[0]!.id),
     ).not.toThrow()
-    expect(() =>
-      parseResult(JSON.stringify(citedFeedback), original, "independent", original.config.seats[0]!.id),
-    ).toThrow("未知 ID：humanFeedback")
+    const sanitized = parseResult(
+      JSON.stringify(citedFeedback),
+      original,
+      "independent",
+      original.config.seats[0]!.id,
+    ) as { issues: Array<{ evidenceIds: string[] }> }
+    expect(sanitized.issues[0]?.evidenceIds).toEqual([])
     expect(JSON.stringify(engine.store.get(original.id))).toBe(snapshot)
     await expect(engine.decide(decided.id, decided.scope, decided.revision, "reject", "改主意")).rejects.toThrow(
       "尚未记录",
@@ -521,7 +513,7 @@ describe("作用域与人工决策", () => {
     value.config.seats[0]!.modelKey = "openai"
     await expect(engine.create(value)).rejects.toThrow("未接通")
   })
-  it("结构化输出拒绝伪造证据和遗漏问题", async () => {
+  it("Host 丢弃未知证据并补齐遗漏的问题映射", async () => {
     const { engine } = await setup()
     const run = await engine.create(input())
     const response = await new DemoGateway(0).generate({
@@ -533,12 +525,18 @@ describe("作用域与人工决策", () => {
     })
     const value = JSON.parse(response.text)
     value.issues[0].evidenceIds = ["不存在的外部来源"]
-    expect(() => parseResult(JSON.stringify(value), run, "independent", "growth")).toThrow()
+    const review = parseResult(JSON.stringify(value), run, "independent", "growth") as {
+      issues: Array<{ evidenceIds: string[] }>
+    }
+    expect(review.issues[0]?.evidenceIds).toEqual([])
     const completed = await complete(engine)
     const revision = { ...completed.revisionResult, changes: [] }
-    expect(() => parseResult(JSON.stringify(revision), completed, "revise", "editor")).toThrow("引用")
+    const normalized = parseResult(JSON.stringify(revision), completed, "revise", "editor") as {
+      changes: Array<{ issueId: string }>
+    }
+    expect(normalized.changes.map(item => item.issueId)).toEqual(completed.issues.map(issue => issue.id))
   })
-  it("丢弃模型输出中的冗余字段，但仍拒绝缺失的必填字段", async () => {
+  it("丢弃模型输出中的冗余字段，并为缺失字段提供保守默认值", async () => {
     const { engine } = await setup()
     const completed = await complete(engine)
     const prompt = makePrompt(completed, "discuss", "delivery")
@@ -558,8 +556,9 @@ describe("作用域与人工决策", () => {
     expect(parsed).not.toHaveProperty("responses.0.unexpectedBallotField")
 
     delete value.responses[0]!.proposedChange
-    expect(() => parseResult(JSON.stringify(value), completed, "discuss", "delivery")).toThrow(
-      "responses.0.proposedChange",
-    )
+    const normalized = parseResult(JSON.stringify(value), completed, "discuss", "delivery") as {
+      responses: Array<{ proposedChange: string }>
+    }
+    expect(normalized.responses[0]?.proposedChange).toContain("保留当前问题")
   })
 })
