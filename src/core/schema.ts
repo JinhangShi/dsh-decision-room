@@ -400,6 +400,22 @@ export const REVIEW_MODES = [
       callTimeoutSeconds: 180,
     },
   },
+  {
+    id: "overnight",
+    label: "持续评审",
+    duration: "最长 8 小时",
+    description: "适合长时间无人值守运行，为持续交叉质询、格式重试和复杂材料处理预留充足额度。若观点提前收敛会提前完成。",
+    limits: {
+      maxRounds: 64,
+      maxCalls: 360,
+      maxDurationMinutes: 480,
+      concurrency: 2,
+      tokenBudget: 15000000,
+      maxCostCny: null,
+      outputTokens: 10000,
+      callTimeoutSeconds: 300,
+    },
+  },
 ] as const satisfies ReadonlyArray<{
   id: string
   label: string

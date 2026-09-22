@@ -57,6 +57,11 @@ function duration(ms: number): string {
     ? `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
     : `${minutes} 分 ${Math.floor(ms / 1000) % 60} 秒`
 }
+function durationLimit(minutes: number): string {
+  if (minutes >= 60 && minutes % 60 === 0) return `最多 ${minutes / 60} 小时`
+  if (minutes >= 60) return `最多 ${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`
+  return `最多 ${minutes} 分钟`
+}
 function ModelSelect({
   label,
   value,
@@ -878,7 +883,7 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                 <div>
                   <small>讨论用时</small>
                   <strong>{duration(activeElapsed(run, now))}</strong>
-                  <span>最多 {run.config.limits.maxDurationMinutes} 分钟</span>
+                  <span>{durationLimit(run.config.limits.maxDurationMinutes)}</span>
                 </div>
                 <div>
                   <small>模型调用</small>

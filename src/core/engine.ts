@@ -38,6 +38,12 @@ function safeError(error: unknown): string {
 function retryableOutputError(error: unknown): boolean {
   return error instanceof DecisionError && ["OUTPUT_JSON", "OUTPUT_SCHEMA", "REFERENCES"].includes(error.code)
 }
+function canDeferSeatFailure(phase: Phase, error?: unknown): boolean {
+  return (phase === "independent" || phase === "discuss") && !retryableOutputError(error)
+}
+function wasOutputFailure(error?: string): boolean {
+  return Boolean(error && (error.includes("结构化评审") || error.includes("问题／材料引用")))
+}
 const SEVERITY_RANK = { low: 0, medium: 1, high: 2, critical: 3 } as const
 function mergedIssueText(
   members: Run["issues"],
@@ -87,13 +93,16 @@ export class DecisionEngine {
 
   async initialize(): Promise<void> {
     await this.store.initialize()
+    const unattended = new Set<string>()
     for (const record of this.store.list()) {
       if (record.status === "running" || record.calls.some(call => call.status === "running")) {
         await this.store.update(record.id, run => {
           stopClock(run)
           run.status = "paused"
           run.epoch += 1
-          run.stopReason = "宿主重启：已恢复检查点，待你继续。中断调用按预留额度保守计入，不自动重发"
+          run.stopReason = run.config.limits.maxDurationMinutes >= 480
+            ? "宿主重启：已恢复检查点，持续评审将自动续跑；中断调用按预留额度保守计入，不重复发送"
+            : "宿主重启：已恢复检查点，待你继续。中断调用按预留额度保守计入，不自动重发"
           for (const call of run.calls.filter(item => item.status === "running")) {
             call.status = "interrupted"
             call.accounting = "uncertain"
@@ -101,6 +110,20 @@ export class DecisionEngine {
           }
           event(run, "recovered", run.stopReason)
         })
+        if (record.config.limits.maxDurationMinutes >= 480) unattended.add(record.id)
+      }
+    }
+    for (const id of unattended) {
+      const run = this.store.get(id)
+      if (run.status === "paused") {
+        await this.store.update(id, current => {
+          current.status = "running"
+          current.epoch += 1
+          current.activeSince = Date.now()
+          delete current.stopReason
+          event(current, "auto_resume", "持续评审已从检查点自动续跑")
+        })
+        this.launch(id)
       }
     }
   }
@@ -419,6 +442,11 @@ export class DecisionEngine {
       reserveCheck(run, tokens, reservedCost)
       const attempts = run.calls.filter(call => call.key === key).length
       if (attempts >= 3) {
+        const last = run.calls.filter(call => call.key === key).at(-1)
+        if (canDeferSeatFailure(phase) && !wasOutputFailure(last?.error)) {
+          event(run, "call_deferred", `${phase} · ${seatId} 已连续失败三次，本轮标记缺席，后续轮次继续补偿重试`)
+          return
+        }
         throw new DecisionError("RETRY_LIMIT", "该步骤已尝试三次，请修正模型配置或材料后创建新版本")
       }
       run.calls.push({
@@ -488,7 +516,16 @@ export class DecisionEngine {
           used.costCny !== null &&
           used.costCny > updated.config.limits.maxCostCny)
       ) {
-        await this.pauseForError(id, epoch, "上游报告用量超过预留／总预算，已停止后续请求，请核对网关计费")
+        if (phase === "discuss" || phase === "interpret") {
+          await this.store.update(id, run => {
+            if (run.status === "running" && run.epoch === epoch) {
+              run.phase = "revise"
+              event(run, "discussion_closed", "已达到 Token 或金额上限；保留当前快照并转入修订与独立复核")
+            }
+          })
+        } else {
+          await this.pauseForError(id, epoch, "上游报告用量超过预留／总预算，已停止后续请求，请核对网关计费")
+        }
       }
     } catch (error) {
       const receipt = response ?? (error instanceof GatewayError ? error.response : undefined)
@@ -503,16 +540,22 @@ export class DecisionEngine {
       const failed = this.store.get(id)
       const attempts = failed.calls.filter(call => call.key === key).length
       if (
-        retryableOutputError(error) &&
+        (retryableOutputError(error) || !(error instanceof GatewayError)) &&
         !controller.signal.aborted &&
         failed.status === "running" &&
         failed.epoch === epoch &&
         attempts < 3
       ) {
         await this.store.update(id, run => {
-          event(run, "call_retry", `${phase} · ${seatId} 输出校验失败，自动进行第 ${attempts + 1} 次尝试`)
+          event(run, "call_retry", `${phase} · ${seatId} ${retryableOutputError(error) ? "输出校验失败" : "调用失败"}，自动进行第 ${attempts + 1} 次尝试`)
         })
         await this.callReserved(id, epoch, phase, seatId, modelKey, controller)
+        return
+      }
+      if (canDeferSeatFailure(phase, error) && !controller.signal.aborted && failed.status === "running" && failed.epoch === epoch) {
+        await this.store.update(id, run => {
+          event(run, "call_deferred", `${phase} · ${seatId} 本轮缺席，Host 将使用已返回席位结果并在后续轮次补偿`)
+        })
         return
       }
       await this.pauseForError(id, epoch, safeError(error))
@@ -633,7 +676,14 @@ export class DecisionEngine {
         return
       }
       if (activeElapsed(run) >= run.config.limits.maxDurationMinutes * 60000) {
-        await this.pauseForError(id, epoch, "已到讨论时间上限，检查点已保存")
+        if (run.phase === "discuss" || run.phase === "interpret") {
+          await this.advance(id, epoch, draft => {
+            draft.phase = "revise"
+            event(draft, "discussion_closed", "已到时间上限；保留当前快照并转入修订与独立复核")
+          })
+          continue
+        }
+        await this.pauseForError(id, epoch, "已到时间上限，当前阶段缺少可供修订的完整材料；检查点已保存")
         return
       }
       if (run.phase === "independent") {
@@ -642,8 +692,13 @@ export class DecisionEngine {
           const reviews = draft.calls.filter(
             call => call.purpose !== "compaction" && call.phase === "independent" && call.status === "succeeded",
           )
+          if (reviews.length === 0) throw new DecisionError("BARRIER", "独立评审尚未提交任何结果")
           if (reviews.length !== draft.config.seats.length) {
-            throw new DecisionError("BARRIER", "独立评审尚未全部提交")
+            event(
+              draft,
+              "partial_phase",
+              `独立评审有 ${draft.config.seats.length - reviews.length} 个席位缺席；先公开已有结果，缺席席位将在后续讨论轮次补偿`,
+            )
           }
           draft.issues = reviews.flatMap(call =>
             reviewSchema.parse(call.result).issues.map((issue, index) => ({

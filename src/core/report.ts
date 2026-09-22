@@ -146,7 +146,11 @@ export function reportMarkdown(run: Run, models: Model[]): string {
     `- 讨论聚合：${deliberation.coverageSatisfied ? "所需独立覆盖已达到" : "独立覆盖尚未达到"}；${deliberation.stableBallots ? "连续两轮票型稳定" : "尚未确认连续稳定"}。票型只用于呈现分歧，不把多数意见当作事实。`,
     `- 调用：${usage.calls}/${run.config.limits.maxCalls}；已计入及预留 Token：${usage.tokens}；其中 ${usage.uncertain} 次用量未确定。`,
     `- 费用：${usage.costCny === null ? "价格未配置，金额未核定" : `按配置价格估算 ¥${usage.costCny.toFixed(6)}，最终以供应商账单为准`}`,
-    `- 活跃时间：${Math.ceil(activeElapsed(run) / 60000)} 分钟；最长 ${run.config.limits.maxDurationMinutes} 分钟。`,
+    `- 活跃时间：${Math.ceil(activeElapsed(run) / 60000)} 分钟；最长 ${
+      run.config.limits.maxDurationMinutes >= 60 && run.config.limits.maxDurationMinutes % 60 === 0
+        ? `${run.config.limits.maxDurationMinutes / 60} 小时`
+        : `${run.config.limits.maxDurationMinutes} 分钟`
+    }。`,
     `- 停止说明：${run.stopReason ?? "按阶段终止条件完成"}`,
     "",
     "## 材料目录",

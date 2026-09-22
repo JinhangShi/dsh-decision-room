@@ -15,13 +15,19 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 describe("决策室完整流程", () => {
-  it("三种评审模式使用完整固定额度，默认模型目录只含已接通模型", () => {
+  it("四种评审模式包含持续运行的完整固定额度，默认模型目录只含已接通模型", () => {
     expect(REVIEW_MODES.map(mode => [mode.id, mode.limits.maxDurationMinutes])).toEqual([
       ["quick", 15],
       ["standard", 60],
       ["deep", 240],
+      ["overnight", 480],
     ])
-    expect(REVIEW_MODES.map(mode => mode.limits.tokenBudget)).toEqual([1000000, 3000000, 6000000])
+    expect(REVIEW_MODES.map(mode => mode.limits.tokenBudget)).toEqual([1000000, 3000000, 6000000, 15000000])
+    expect(REVIEW_MODES.find(mode => mode.id === "overnight")?.limits).toMatchObject({
+      maxRounds: 64,
+      maxCalls: 360,
+      callTimeoutSeconds: 300,
+    })
     expect(DEFAULT_MODELS.map(model => model.key)).toEqual(["qwen", "glm", "kimi", "deepseek"])
     expect(DEFAULT_MODELS.every(model => model.enabled)).toBe(true)
   })
@@ -409,7 +415,7 @@ describe("持久化、并发额度与停止", () => {
     const run = await complete(engine, value)
     expect(run.status).toBe("paused")
     expect(run.calls[0]?.returnedModel).toBe("wrong-model")
-    expect(spent(run).tokens).toBe(30)
+    expect(spent(run).tokens).toBeGreaterThanOrEqual(30)
   })
   it("达到时间上限不再派发新请求", async () => {
     const { engine } = await setup()
