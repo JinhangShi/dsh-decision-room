@@ -1,6 +1,7 @@
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir, rm, writeFile } from "node:fs/promises"
 import { build } from "esbuild"
 
+await rm("lib", { recursive: true, force: true })
 await mkdir("lib/web", { recursive: true })
 await build({
   entryPoints: ["src/index.ts"],

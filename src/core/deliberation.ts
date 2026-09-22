@@ -20,6 +20,7 @@ export type DeliberationAssessment = {
   stableBallots: boolean
   noNewInformation: boolean
   noFurtherDiscussion: boolean
+  stagnantRounds: number
   allNeedEvidence: boolean
   unreviewedCriticalBlockerIds: string[]
   issues: IssueBallotSummary[]
@@ -62,6 +63,38 @@ function roundSignature(run: Run, round: number): string | undefined {
     )
     .sort((a, b) => a.issueId.localeCompare(b.issueId))
   return entries.length === run.issues.length ? JSON.stringify(entries) : undefined
+}
+
+function roundHasNewInformation(run: Run, round: number): boolean {
+  const current = successfulRounds(run).filter(item => item.call.round === round)
+  if (roundSignature(run, round) === undefined) return true
+  if (run.mcpCalls.some(call => call.round === round && call.status === "succeeded" && call.evidenceId)) return true
+  const priorEvidence = new Set(
+    successfulRounds(run)
+      .filter(item => item.call.round < round)
+      .flatMap(item => item.result.responses.flatMap(response => response.evidenceIds)),
+  )
+  return current.some(
+    item =>
+      item.result.responses.some(response => response.newInformation) ||
+      item.result.responses.some(response => response.evidenceIds.some(id => !priorEvidence.has(id))),
+  )
+}
+
+function stagnantRoundCount(run: Run, round: number): number {
+  let count = 0
+  for (let current = round; current > 1; current -= 1) {
+    const signature = roundSignature(run, current)
+    if (
+      signature === undefined ||
+      signature !== roundSignature(run, current - 1) ||
+      roundHasNewInformation(run, current)
+    ) {
+      break
+    }
+    count += 1
+  }
+  return count
 }
 
 /** Deterministic Host-owned aggregation. It reports votes; it never converts agreement into factual truth. */
@@ -129,6 +162,7 @@ export function assessDeliberation(run: Run, round = run.round): DeliberationAss
     noNewInformation:
       currentResponses.length > 0 && !discoveredEvidence && currentResponses.every(item => !item.newInformation),
     noFurtherDiscussion: current.length > 0 && current.every(item => !item.result.continueDiscussion),
+    stagnantRounds: stagnantRoundCount(run, round),
     allNeedEvidence:
       currentResponses.length > 0 && currentResponses.every(response => response.position === "needs_evidence"),
     unreviewedCriticalBlockerIds,

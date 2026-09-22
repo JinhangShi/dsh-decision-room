@@ -5,7 +5,12 @@ import { DecisionEngine, publicRun } from "../core/engine.js"
 import { defaultConfiguration, publicModels } from "../core/models.js"
 import { reportHtml, reportMarkdown } from "../core/report.js"
 import { assertScope, createSchema, DecisionError, scopeSchema } from "../core/schema.js"
-import { applyGatewaySettings, clearGatewaySettings, gatewaySettingsSchema, gatewaySettingsView } from "./config.js"
+import {
+  applyGatewaySettings,
+  clearGatewaySettings,
+  gatewaySettingsSchema,
+  gatewaySettingsView,
+} from "./config.js"
 
 export type RequestLike = AsyncIterable<Uint8Array> & {
   method?: string

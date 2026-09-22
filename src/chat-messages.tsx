@@ -67,6 +67,7 @@ export function DecisionProgressCard({
   compact?: boolean
 }): JSX.Element {
   const value = node.data
+  const mcp = value.mcp ?? { calls: 0, limit: 0, sources: 0, failed: 0 }
   const [error, setError] = useState("")
   useEffect(() => {
     if (value.status === "running") {
@@ -114,6 +115,7 @@ export function DecisionProgressCard({
         <p className="decision-seat-summary">
           {submittedSeats}/{value.seats.length} 个席位已提交 · {value.calls.length} 次调用
           {failedCalls ? ` · ${failedCalls} 次需关注` : ""}
+          {mcp.sources ? ` · ${mcp.sources} 条 MCP 材料` : ""}
         </p>
       ) : (
         <div className="decision-seats">
@@ -140,7 +142,7 @@ export function DecisionProgressCard({
       <p className="decision-caption">
         {compact
           ? "完整发言和报告保留在主聊天。"
-          : `调用 ${value.calls.length} / ${value.maxCalls} · 已计入 / 预留 ${value.tokens.toLocaleString()} / ${value.tokenBudget.toLocaleString()} Token`}
+          : `调用 ${value.calls.length} / ${value.maxCalls} · MCP 调用 ${mcp.calls} / ${mcp.limit} · 已计入 / 预留 ${value.tokens.toLocaleString()} / ${value.tokenBudget.toLocaleString()} Token`}
       </p>
       {compact && (
         <div className="decision-limit-summary" aria-label="任务执行上限">
@@ -149,6 +151,9 @@ export function DecisionProgressCard({
           </span>
           <span>
             模型调用 <strong>{value.calls.length}</strong> / {value.maxCalls}
+          </span>
+          <span>
+            MCP 调用 <strong>{mcp.calls}</strong> / {mcp.limit}
           </span>
         </div>
       )}
@@ -161,6 +166,7 @@ export function DecisionProgressCard({
                 <span>第 {snapshot.round} 轮</span>
                 <small>
                   {snapshot.ballot.issues.length} 项 · {snapshot.ballot.coverageSatisfied ? "覆盖达标" : "覆盖进行中"}
+                  {snapshot.ballot.stagnantRounds ? ` · 连续无新增 ${snapshot.ballot.stagnantRounds}/3 轮` : ""}
                 </small>
               </summary>
               {snapshot.interpretation ? (
@@ -223,7 +229,7 @@ export function DecisionProgressCard({
             <span>表决总览</span>
             <small>
               {value.ballot.issues.length} 项 · {value.ballot.coverageSatisfied ? "覆盖达标" : "覆盖进行中"}
-              {value.ballot.stableBallots ? " · 票型稳定" : ""}
+              {value.ballot.stagnantRounds ? ` · 连续无新增 ${value.ballot.stagnantRounds}/3 轮` : ""}
             </small>
           </summary>
           <div className="decision-ballot-legend">
@@ -238,6 +244,10 @@ export function DecisionProgressCard({
             </p>
             <p>
               <strong>证据</strong>：评审认为材料支持、相互冲突或缺失；不代表外部核验。
+            </p>
+            <p>
+              <strong>连续无新增</strong>：票型、证据和问题均未变化的连续轮数；达到 3 轮后由 Host
+              强制进入修订，席位要求继续仅作参考。
             </p>
           </div>
           {value.ballot.issues.length === 0 ? (

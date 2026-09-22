@@ -209,7 +209,7 @@ describe("决策室完整流程", () => {
     expect(summary.modelFamilyCount).toBe(1)
     expect(assessment.coverageSatisfied).toBe(false)
   })
-  it("持续产生问题时可运行 24 轮，不被固定 11 次调用截断", async () => {
+  it("席位持续要求讨论时，Host 在连续三轮无变化后强制收敛", async () => {
     const demo = new DemoGateway(0)
     const gateway: ModelGateway = {
       async generate(request) {
@@ -232,15 +232,47 @@ describe("决策室完整流程", () => {
     value.config.limits = structuredClone(REVIEW_MODES.find(mode => mode.id === "deep")!.limits)
     const run = await complete(engine, value)
     expect(run.status).toBe("completed")
-    expect(run.round).toBe(24)
-    expect(run.calls).toHaveLength(127)
+    expect(run.round).toBe(4)
+    expect(run.calls).toHaveLength(27)
     expect(run.config.limits.maxDurationMinutes).toBe(240)
+    expect(assessDeliberation(run).stagnantRounds).toBe(3)
+    expect(run.events.find(event => event.type === "discussion_closed")?.text).toContain("Host 强制收敛")
     for (const issue of assessDeliberation(run).issues) {
       const total = Object.values(issue.positions).reduce((sum, count) => sum + count, 0)
       expect(total).toBe(issue.reviewerCount)
       expect(total).toBeLessThanOrEqual(run.config.seats.length)
       expect(issue.blockingVotes).toBeLessThanOrEqual(run.config.seats.length)
     }
+  })
+  it("本轮取得新的 MCP 证据后重新计算三轮稳定窗口", async () => {
+    const demo = new DemoGateway(0)
+    let added = false
+    const gateway: ModelGateway = {
+      async generate(request) {
+        const prompt = JSON.parse(request.prompt)
+        if (request.context?.phase === "discuss" && prompt.round === 3 && !added) {
+          added = true
+          await request.context.authorizeTool("new-evidence", "mcp__qcc-company__search", { keyword: "测试企业" })
+          await request.context.toolDecision("new-evidence", "running")
+          await request.context.toolReceipt("new-evidence", "mcp__qcc-company__search", "第 3 轮新增外部材料")
+        }
+        const response = await demo.generate(request)
+        if (prompt.phase === "discuss") {
+          const value = JSON.parse(response.text)
+          value.continueDiscussion = true
+          for (const answer of value.responses) answer.position = "maintain"
+          response.text = JSON.stringify(value)
+        }
+        return response
+      },
+    }
+    const { engine } = await setup(gateway)
+    const value = input()
+    value.config.limits = structuredClone(REVIEW_MODES.find(mode => mode.id === "deep")!.limits)
+    const run = await complete(engine, value)
+    expect(run.round).toBe(6)
+    expect(run.mcpEvidence).toHaveLength(1)
+    expect(assessDeliberation(run).stagnantRounds).toBe(3)
   })
   it("提前保护修订和复核的调用额度", async () => {
     const { engine } = await setup()
@@ -273,6 +305,38 @@ describe("决策室完整流程", () => {
 })
 
 describe("持久化、并发额度与停止", () => {
+  it("暂停任务会结清等待授权和执行中的 MCP 调用", async () => {
+    const { engine } = await setup()
+    const draft = await engine.create(input())
+    const pending = await engine.store.update(draft.id, run => {
+      run.mcpCalls.push(
+        {
+          id: "approval-pending",
+          toolName: "mcp__qcc-company__search",
+          phase: "discuss",
+          round: 1,
+          seatId: "growth",
+          arguments: {},
+          status: "awaiting_approval",
+          startedAt: Date.now(),
+        },
+        {
+          id: "tool-running",
+          toolName: "mcp__qcc-risk__query",
+          phase: "discuss",
+          round: 1,
+          seatId: "risk",
+          arguments: {},
+          status: "running",
+          startedAt: Date.now(),
+        },
+      )
+    })
+    const paused = await engine.control(pending.id, pending.scope, "pause", pending.revision)
+    expect(paused.mcpCalls.map(call => call.status)).toEqual(["cancelled", "cancelled"])
+    expect(paused.mcpCalls.every(call => call.endedAt !== undefined)).toBe(true)
+  })
+
   it("并发调用前原子预留，不会先发请求再发现额度不足", async () => {
     let calls = 0
     const demo = new DemoGateway(100)
@@ -362,6 +426,17 @@ describe("持久化、并发额度与停止", () => {
         accounting: "reserved",
         promptHash: "hash",
       })
+      run.mcpCalls.push({
+        id: "pending-mcp",
+        primaryCallId: "interrupted",
+        toolName: "mcp__qcc-company__search",
+        phase: "discuss",
+        round: 1,
+        seatId: "growth",
+        arguments: { keyword: "测试企业" },
+        status: "awaiting_approval",
+        startedAt: Date.now(),
+      })
     })
     const generate = vi.fn()
     const recovered = new DecisionEngine(new RunStore(persistence), DEFAULT_MODELS, { generate })
@@ -370,6 +445,7 @@ describe("持久化、并发额度与停止", () => {
     expect(run.status).toBe("paused")
     expect(run.elapsedMs).toBeGreaterThanOrEqual(2000)
     expect(run.calls[0]?.accounting).toBe("uncertain")
+    expect(run.mcpCalls[0]).toMatchObject({ status: "cancelled", error: expect.stringContaining("宿主重启") })
     expect(spent(run).tokens).toBe(1234)
     expect(generate).not.toHaveBeenCalled()
   })

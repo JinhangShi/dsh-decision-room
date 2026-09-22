@@ -1,10 +1,11 @@
 import type { Model } from "./models.js"
+import type { ContentBlock, Message, ToolSchema } from "@deepseek-ai/dsh-llm"
 import { acceptsReturnedModel } from "./model-identity.js"
 import { DecisionError, type Phase, type Run, type Usage } from "./schema.js"
 
 export type WireMessage = { role: "user" | "assistant"; content: string }
 export type ContextDispatch = {
-  purpose: "review" | "compaction"
+  purpose: "review" | "compaction" | "tool_followup"
   inputTokens: number
   outputTokens: number
   hash: string
@@ -16,6 +17,13 @@ export type ReviewContext = {
   seatId: string
   authorize(dispatch: ContextDispatch): Promise<string>
   receipt(id: string, response: ModelResponse | undefined, error?: string): Promise<void>
+  authorizeTool(callId: string, name: string, args: unknown): Promise<void>
+  toolDecision(
+    callId: string,
+    decision: "awaiting_approval" | "running" | "denied" | "failed",
+    reason?: string,
+  ): Promise<void>
+  toolReceipt(callId: string, name: string, content: string, error?: string): Promise<void>
 }
 
 export type ModelRequest = {
@@ -25,10 +33,18 @@ export type ModelRequest = {
   maxOutputTokens: number
   signal: AbortSignal
   messages?: WireMessage[]
+  dshMessages?: Message[]
+  tools?: ToolSchema[]
   headers?: Record<string, string>
   context?: ReviewContext
 }
-export type ModelResponse = { text: string; returnedModel?: string; usage?: Usage }
+export type ModelResponse = {
+  text: string
+  returnedModel?: string
+  usage?: Usage
+  toolCalls?: Array<{ id: string; name: string; arguments: string }>
+  finishReason?: "stop" | "tool_calls"
+}
 export interface ModelGateway {
   readonly managedContext?: boolean
   estimate?(system: string, prompt: string, output: number): number
@@ -41,6 +57,34 @@ function object(value: unknown): JsonObject {
 }
 function count(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+function textBlocks(blocks: ContentBlock[]): string {
+  return blocks
+    .filter((block): block is Extract<ContentBlock, { type: "text" }> => block.type === "text")
+    .map(block => block.text)
+    .join("\n")
+}
+function chatMessages(messages: Message[]): JsonObject[] {
+  return messages.flatMap<JsonObject>(message => {
+    const toolResults = message.content.filter(
+      (block): block is Extract<ContentBlock, { type: "tool-result" }> => block.type === "tool-result",
+    )
+    if (toolResults.length) {
+      return toolResults.map(toolResult => ({
+        role: "tool",
+        tool_call_id: toolResult.toolCallId,
+        content: textBlocks(toolResult.content),
+      }))
+    }
+    const toolCalls = message.content
+      .filter((block): block is Extract<ContentBlock, { type: "tool-call" }> => block.type === "tool-call")
+      .map(block => ({ id: block.id, type: "function", function: { name: block.name, arguments: block.arguments } }))
+    return {
+      role: message.role === "system" ? "system" : message.role,
+      content: textBlocks(message.content) || (toolCalls.length ? null : ""),
+      ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+    }
+  })
 }
 export class GatewayError extends DecisionError {
   constructor(
@@ -132,7 +176,18 @@ export class HttpGateway implements ModelGateway {
       body = {
         ...model.extraBody,
         model: model.model,
-        messages: [{ role: "system", content: system }, ...messages],
+        messages: request.dshMessages
+          ? [{ role: "system", content: system }, ...chatMessages(request.dshMessages)]
+          : [{ role: "system", content: system }, ...messages],
+        ...(request.tools?.length
+          ? {
+              tools: request.tools.map(tool => ({
+                type: "function",
+                function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+              })),
+              tool_choice: "auto",
+            }
+          : {}),
         stream: false,
         [model.outputParameter]: maxOutputTokens,
       }
@@ -180,11 +235,25 @@ export class HttpGateway implements ModelGateway {
           }
         : undefined
     let text = ""
+    let toolCalls: ModelResponse["toolCalls"]
+    let finishReason: ModelResponse["finishReason"]
     let truncated = false
     if (Array.isArray(payload.choices)) {
       const choice = object(payload.choices[0])
       const message = object(choice.message)
       text = typeof message.content === "string" ? message.content : ""
+      toolCalls = Array.isArray(message.tool_calls)
+        ? message.tool_calls
+            .map(object)
+            .map(call => ({ call, fn: object(call.function) }))
+            .filter(({ call, fn }) => typeof call.id === "string" && typeof fn.name === "string")
+            .map(({ call, fn }) => ({
+              id: String(call.id).slice(0, 200),
+              name: String(fn.name).slice(0, 300),
+              arguments: typeof fn.arguments === "string" ? fn.arguments : "{}",
+            }))
+        : undefined
+      finishReason = choice.finish_reason === "tool_calls" || toolCalls?.length ? "tool_calls" : undefined
       truncated = choice.finish_reason === "length"
     } else if (Array.isArray(payload.content)) {
       text = payload.content
@@ -204,7 +273,12 @@ export class HttpGateway implements ModelGateway {
         .join("")
       truncated = payload.status === "incomplete"
     }
-    const result = { text, returnedModel, usage }
+    const result: ModelResponse = {
+      text,
+      returnedModel,
+      usage,
+      ...(toolCalls?.length ? { toolCalls, finishReason: finishReason ?? "tool_calls" } : {}),
+    }
     if (payload.error) {
       throw new GatewayError("UPSTREAM_ERROR", "网关返回了错误状态，未将其计为成功评审", result)
     }
@@ -218,7 +292,7 @@ export class HttpGateway implements ModelGateway {
     if (truncated) {
       throw new GatewayError("TRUNCATED", "模型输出被截断；请增加输出额度后创建新版本，或缩小方案范围", result)
     }
-    if (!text.trim()) {
+    if (!text.trim() && !toolCalls?.length) {
       throw new GatewayError("EMPTY_TEXT", "模型未返回可见文本", result)
     }
     return result

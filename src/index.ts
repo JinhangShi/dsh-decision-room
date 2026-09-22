@@ -245,6 +245,8 @@ export function apply(ctx: HostContext): void {
           phase: run.phase,
           stopReason: run.stopReason,
           issues: visible.issues,
+          mcpCalls: visible.mcpCalls,
+          mcpEvidence: visible.mcpEvidence,
           revision: visible.revisionResult,
           verification: visible.verification,
           humanDecision: visible.humanDecision,

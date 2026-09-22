@@ -12,7 +12,7 @@ import type { SessionId, SessionStore } from "@deepseek-ai/dsh-session"
 import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence"
 import type { TokenMeter } from "@deepseek-ai/dsh-token-meter"
 import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt"
-import { DecisionError } from "../core/schema.js"
+import { DecisionError, type Phase } from "../core/schema.js"
 import { GatewayError, type ModelGateway, type ModelRequest, type ModelResponse } from "../core/gateway.js"
 import type { Model } from "../core/models.js"
 
@@ -24,13 +24,23 @@ export type NativeServices = {
   tokenMeter: TokenMeter
   llm: LlmRuntime
 }
-type Active = { request: ModelRequest; response?: ModelResponse; error?: unknown; dispatched: boolean }
+type Active = {
+  request: ModelRequest
+  response?: ModelResponse
+  primaryResponse?: ModelResponse
+  error?: unknown
+  dispatched: boolean
+}
 const PROVIDER = "dsh-decision-room"
 const textContent = (message: Message) =>
   message.content
     .filter(block => block.type === "text")
     .map(block => block.text)
     .join("\n")
+
+export function mcpToolsForPhase<T extends { name: string }>(tools: T[], phase: Phase | undefined): T[] {
+  return phase === "discuss" ? tools.filter(tool => tool.name.startsWith("mcp__")) : []
+}
 
 class DecisionAdapter extends LlmAdapter {
   constructor(private owner: NativeGateway) {
@@ -127,15 +137,77 @@ export class NativeGateway implements ModelGateway {
         await this.services.agentPresets.mount(ctx, "standard")
         const scoped = ctx as typeof ctx & {
           systemPrompt: SystemPrompt
-          tools: { restrict(value: { allow: string[] }): unknown; guard?(guard: () => string): unknown }
+          tools: {
+            guard?(guard: (exec: { name: string }) => string | undefined): unknown
+          }
+          on(
+            name: "tools/pre-execute",
+            listener: (
+              exec: { callId: string; name: string; arguments: unknown },
+              next: () => Promise<{ kind: "allow" | "deny" | "ask"; reason?: string }>,
+            ) => Promise<{ kind: "allow" | "deny" | "ask"; reason?: string }>,
+          ): unknown
+          on(
+            name: "tools/post-execute",
+            listener: (
+              exec: { callId: string; name: string },
+              result: { isError: boolean; content: Message["content"] },
+              next: () => Promise<unknown>,
+            ) => Promise<unknown>,
+          ): unknown
         }
-        scoped.tools.restrict({ allow: [] })
-        scoped.tools.guard?.(() => "决策室评审角色只允许文本评审，禁止执行工具")
+        scoped.tools.guard?.(exec =>
+          exec.name.startsWith("mcp__") && this.active.get(id)?.request.context?.phase === "discuss"
+            ? undefined
+            : "决策室只在首轮结果公开后的交叉讨论阶段允许调用 MCP 工具",
+        )
+        scoped.on("tools/pre-execute", async (exec, next) => {
+          if (!exec.name.startsWith("mcp__")) return { kind: "deny", reason: "仅允许 MCP 工具" }
+          const active = this.active.get(id)
+          if (!active?.request.context) return { kind: "deny", reason: "MCP 调用不属于活动评审任务" }
+          if (active.request.context.phase !== "discuss") {
+            return { kind: "deny", reason: "独立首评隔离期间不允许外部工具" }
+          }
+          await active.request.context.authorizeTool(String(exec.callId), exec.name, exec.arguments)
+          try {
+            // DSH remains the authority for the tool's actual permission. The model may
+            // select any registered MCP, but it cannot bypass the host policy here.
+            const decision = await next()
+            await active.request.context.toolDecision(
+              String(exec.callId),
+              decision.kind === "ask" ? "awaiting_approval" : decision.kind === "allow" ? "running" : "denied",
+              decision.reason,
+            )
+            return decision
+          } catch (error) {
+            await active.request.context.toolDecision(
+              String(exec.callId),
+              "failed",
+              error instanceof DecisionError ? error.message : "DSH 工具策略处理失败",
+            )
+            throw error
+          }
+        })
+        scoped.on("tools/post-execute", async (exec, result, next) => {
+          const active = this.active.get(id)
+          if (active?.request.context && exec.name.startsWith("mcp__")) {
+            const content = result.content
+              .map(block => (block.type === "text" ? block.text : JSON.stringify(block)))
+              .join("\n")
+            await active.request.context.toolReceipt(
+              String(exec.callId),
+              exec.name,
+              content,
+              result.isError ? content || "MCP 工具返回失败" : undefined,
+            )
+          }
+          return next()
+        })
         scoped.systemPrompt.section({ name: "decision-room-review", order: -1000, complete: true, text: system })
         scoped.on("system-prompt/assemble", async (_assembly, _context, next) => {
           const result = await next()
           result.contexts = []
-          result.tools = []
+          result.tools = mcpToolsForPhase(result.tools, this.active.get(id)?.request.context?.phase)
           return result
         })
         scoped.on("agent/request", async ({ agent }, next) => {
@@ -240,10 +312,7 @@ export class NativeGateway implements ModelGateway {
     if (options.model !== request.model.key) {
       throw new DecisionError("MODEL_ROUTE", "DSH 会话路由与席位模型不一致")
     }
-    const purpose = options.purpose === "compaction" ? "compaction" : "review"
-    if (purpose === "review" && state.dispatched) {
-      throw new DecisionError("RETRY_LIMIT", "本次步骤已发起模型请求，额外重试需要从检查点继续")
-    }
+    const purpose = options.purpose === "compaction" ? "compaction" : state.dispatched ? "tool_followup" : "review"
     const output = Math.min(options.maxTokens ?? request.maxOutputTokens, request.maxOutputTokens)
     const input =
       this.estimate(options.system ?? "", "", 0) +
@@ -264,7 +333,7 @@ export class NativeGateway implements ModelGateway {
         hash: createHash("sha256").update(JSON.stringify(options.messages)).digest("hex"),
         sessionId: String(options.sessionId),
       })
-      if (purpose === "review") {
+      if (purpose !== "compaction") {
         state.dispatched = true
       }
       const signal = options.signal ? AbortSignal.any([request.signal, options.signal]) : request.signal
@@ -278,23 +347,61 @@ export class NativeGateway implements ModelGateway {
             role: message.role === "assistant" ? "assistant" : "user",
             content: textContent(message),
           })),
+        dshMessages: options.messages,
+        tools: options.tools,
         headers: attributionHeaders(),
         signal,
       })
       await request.context!.receipt(receiptId, response)
       if (purpose === "review") {
-        state.response = response
+        state.primaryResponse = response
       }
-      yield { type: "block-start", index: 0, blockType: "text" }
-      yield { type: "text-delta", index: 0, text: response.text }
-      yield { type: "block-end", index: 0, block: { type: "text", text: response.text } }
+      if (response.finishReason === "tool_calls" && response.toolCalls?.length) {
+        for (const [index, call] of response.toolCalls.entries()) {
+          yield { type: "block-start", index, blockType: "tool-call" }
+          yield {
+            type: "tool-call-delta",
+            index,
+            id: call.id as Extract<StreamChunk, { type: "tool-call-delta" }>["id"],
+            name: call.name,
+            argumentsDelta: call.arguments,
+          }
+          yield {
+            type: "block-end",
+            index,
+            block: {
+              type: "tool-call",
+              id: call.id as Extract<StreamChunk, { type: "tool-call-delta" }>["id"],
+              name: call.name,
+              arguments: call.arguments,
+            },
+          }
+        }
+      } else {
+        if (purpose !== "compaction") {
+          state.response =
+            purpose === "tool_followup" && state.primaryResponse
+              ? {
+                  ...response,
+                  returnedModel: state.primaryResponse.returnedModel ?? response.returnedModel,
+                  usage: state.primaryResponse.usage,
+                }
+              : response
+        }
+        yield { type: "block-start", index: 0, blockType: "text" }
+        yield { type: "text-delta", index: 0, text: response.text }
+        yield { type: "block-end", index: 0, block: { type: "text", text: response.text } }
+      }
       if (response.usage) {
         yield {
           type: "usage",
           usage: { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens },
         }
       }
-      yield { type: "finish", reason: { kind: "stop" } }
+      yield {
+        type: "finish",
+        reason: { kind: response.finishReason === "tool_calls" ? "tool-calls" : "stop" },
+      }
     } catch (error) {
       state.error = error
       if (receiptId) {

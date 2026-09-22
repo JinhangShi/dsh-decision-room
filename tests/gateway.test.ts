@@ -39,6 +39,55 @@ describe("模型协议与身份检查", () => {
       enable_thinking: false,
     })
   })
+  it("把当前 MCP 工具交给模型并解析模型自行选择的工具调用", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          model: "qwen3.8-max",
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-qcc-1",
+                    type: "function",
+                    function: { name: "mcp__qcc-company__search", arguments: '{"keyword":"测试企业"}' },
+                  },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+          usage: { prompt_tokens: 20, completion_tokens: 8 },
+        }),
+      ),
+    )
+    const tools = [
+      {
+        name: "mcp__qcc-company__search",
+        description: "查询企业",
+        parameters: { type: "object", properties: { keyword: { type: "string" } }, required: ["keyword"] },
+      },
+    ]
+    const response = await new HttpGateway(env, fetcher).generate({ ...request(), tools })
+    expect(response).toMatchObject({
+      text: "",
+      finishReason: "tool_calls",
+      toolCalls: [
+        { id: "call-qcc-1", name: "mcp__qcc-company__search", arguments: '{"keyword":"测试企业"}' },
+      ],
+    })
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({
+      tool_choice: "auto",
+      tools: [
+        {
+          type: "function",
+          function: { name: "mcp__qcc-company__search", description: "查询企业" },
+        },
+      ],
+    })
+  })
   it("拒绝网关悄悄改路由，但保留计费用量", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

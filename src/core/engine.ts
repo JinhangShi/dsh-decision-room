@@ -32,6 +32,21 @@ function stopClock(run: Run): void {
   run.elapsedMs = activeElapsed(run)
   delete run.activeSince
 }
+function cancelActiveMcpCalls(run: Run, reason: string, primaryCallId?: string): void {
+  let cancelled = 0
+  for (const call of run.mcpCalls) {
+    if (
+      ["requested", "awaiting_approval", "running"].includes(call.status) &&
+      (!primaryCallId || call.primaryCallId === primaryCallId)
+    ) {
+      call.status = "cancelled"
+      call.endedAt = Date.now()
+      call.error = reason.slice(0, 2000)
+      cancelled += 1
+    }
+  }
+  if (cancelled) event(run, "mcp_cancelled", `${cancelled} 个在途 MCP 调用已取消：${reason}`)
+}
 function safeError(error: unknown): string {
   return error instanceof DecisionError ? error.message : "处理失败；检查点已保留。请检查 Host 日志和存储可用性"
 }
@@ -100,14 +115,16 @@ export class DecisionEngine {
           stopClock(run)
           run.status = "paused"
           run.epoch += 1
-          run.stopReason = run.config.limits.maxDurationMinutes >= 480
-            ? "宿主重启：已恢复检查点，持续评审将自动续跑；中断调用按预留额度保守计入，不重复发送"
-            : "宿主重启：已恢复检查点，待你继续。中断调用按预留额度保守计入，不自动重发"
+          run.stopReason =
+            run.config.limits.maxDurationMinutes >= 480
+              ? "宿主重启：已恢复检查点，持续评审将自动续跑；中断调用按预留额度保守计入，不重复发送"
+              : "宿主重启：已恢复检查点，待你继续。中断调用按预留额度保守计入，不自动重发"
           for (const call of run.calls.filter(item => item.status === "running")) {
             call.status = "interrupted"
             call.accounting = "uncertain"
             call.endedAt = Date.now()
           }
+          cancelActiveMcpCalls(run, "宿主重启，无法确认原 MCP 调用是否继续；记录已保留且不会自动重发")
           event(run, "recovered", run.stopReason)
         })
         if (record.config.limits.maxDurationMinutes >= 480) unattended.add(record.id)
@@ -184,6 +201,8 @@ export class DecisionEngine {
       calls: [],
       issues: [],
       events: [],
+      mcpCalls: [],
+      mcpEvidence: [],
       mode: this.mode,
     }
     event(
@@ -255,6 +274,7 @@ export class DecisionEngine {
           run.epoch += 1
           run.status = action === "cancel" ? "cancelled" : "paused"
           run.stopReason = action === "cancel" ? "用户取消，已保留历史结果" : "用户暂停，可从检查点继续"
+          cancelActiveMcpCalls(run, run.stopReason)
           event(run, action, run.stopReason)
         }
       },
@@ -490,11 +510,17 @@ export class DecisionEngine {
             authorize: dispatch => this.authorizeDispatch(id, epoch, callId, model, dispatch),
             receipt: (receiptId, value, error) =>
               this.contextReceipt(id, epoch, callId, receiptId, model, value, error),
+            authorizeTool: (toolCallId, name, args) =>
+              this.authorizeTool(id, epoch, callId, toolCallId, name, args),
+            toolDecision: (toolCallId, decision, reason) =>
+              this.toolDecision(id, epoch, toolCallId, decision, reason),
+            toolReceipt: (toolCallId, name, content, error) =>
+              this.toolReceipt(id, epoch, callId, toolCallId, name, content, error),
           },
         }),
         signal,
       )
-      const result = parseResult(response.text, snapshot, phase, seatId)
+      const result = parseResult(response.text, this.store.get(id), phase, seatId)
       await this.store.update(id, run => {
         const call = run.calls.find(item => item.id === callId)!
         settle(call, model, response?.usage)
@@ -535,6 +561,7 @@ export class DecisionEngine {
         call.returnedModel = receipt?.returnedModel
         call.status = signal.aborted || run.epoch !== epoch ? "interrupted" : "failed"
         call.error = safeError(error)
+        cancelActiveMcpCalls(run, call.error, callId)
         event(run, "call_failed", `${phase} · ${seatId}：${call.error}`)
       })
       const failed = this.store.get(id)
@@ -547,12 +574,21 @@ export class DecisionEngine {
         attempts < 3
       ) {
         await this.store.update(id, run => {
-          event(run, "call_retry", `${phase} · ${seatId} ${retryableOutputError(error) ? "输出校验失败" : "调用失败"}，自动进行第 ${attempts + 1} 次尝试`)
+          event(
+            run,
+            "call_retry",
+            `${phase} · ${seatId} ${retryableOutputError(error) ? "输出校验失败" : "调用失败"}，自动进行第 ${attempts + 1} 次尝试`,
+          )
         })
         await this.callReserved(id, epoch, phase, seatId, modelKey, controller)
         return
       }
-      if (canDeferSeatFailure(phase, error) && !controller.signal.aborted && failed.status === "running" && failed.epoch === epoch) {
+      if (
+        canDeferSeatFailure(phase, error) &&
+        !controller.signal.aborted &&
+        failed.status === "running" &&
+        failed.epoch === epoch
+      ) {
         await this.store.update(id, run => {
           event(run, "call_deferred", `${phase} · ${seatId} 本轮缺席，Host 将使用已返回席位结果并在后续轮次补偿`)
         })
@@ -593,7 +629,7 @@ export class DecisionEngine {
           ...primary,
           id: receiptId,
           key: `compaction:${receiptId}`,
-          purpose: "compaction",
+          purpose: dispatch.purpose,
           result: undefined,
           attempt: 1,
           status: "running",
@@ -608,7 +644,13 @@ export class DecisionEngine {
           promptHash: dispatch.hash,
           contextSessionId: dispatch.sessionId,
         })
-        event(run, "context_compaction", `${primary.seatId} 的 DSH 会话正在压缩上下文，调用已预留预算`)
+        event(
+          run,
+          dispatch.purpose === "compaction" ? "context_compaction" : "tool_followup",
+          dispatch.purpose === "compaction"
+            ? `${primary.seatId} 的 DSH 会话正在压缩上下文，调用已预留预算`
+            : `${primary.seatId} 已取得 MCP 结果，正在继续分析；模型调用已预留预算`,
+        )
       }
     })
     return receiptId
@@ -631,7 +673,11 @@ export class DecisionEngine {
       call.returnedModel = response?.returnedModel
       call.status = run.epoch !== epoch || run.status !== "running" ? "interrupted" : error ? "failed" : "succeeded"
       call.error = error
-      event(run, "context_compacted", error ?? "DSH 上下文压缩完成，原始会话记录保留")
+      event(
+        run,
+        call.purpose === "compaction" ? "context_compacted" : "tool_followup_completed",
+        error ?? (call.purpose === "compaction" ? "DSH 上下文压缩完成，原始会话记录保留" : "MCP 结果分析完成"),
+      )
     })
     const run = this.store.get(id)
     const used = spent(run)
@@ -641,6 +687,113 @@ export class DecisionEngine {
     ) {
       await this.pauseForError(id, epoch, "上下文处理用量超过预算，已暂停后续请求")
     }
+  }
+  private async authorizeTool(
+    id: string,
+    epoch: number,
+    primaryId: string,
+    toolCallId: string,
+    name: string,
+    args: unknown,
+  ): Promise<void> {
+    await this.store.update(id, run => {
+      if (run.status !== "running" || run.epoch !== epoch) throw new DecisionError("STALE", "任务已停止")
+      if (!name.startsWith("mcp__")) throw new DecisionError("TOOL_DENIED", "决策席只能调用当前 DSH 已注册的 MCP 工具")
+      if (run.mcpCalls.some(call => call.id === toolCallId)) return
+      const primary = run.calls.find(call => call.id === primaryId)
+      if (!primary || primary.phase !== "discuss") {
+        throw new DecisionError("TOOL_DENIED", "首轮独立评审公开前不允许调用 MCP 工具")
+      }
+      if (run.mcpCalls.length >= run.config.limits.maxMcpCalls) {
+        throw new DecisionError("MCP_LIMIT", "已达到本任务 MCP 调用次数上限")
+      }
+      run.mcpCalls.push({
+        id: toolCallId,
+        primaryCallId: primaryId,
+        toolName: name,
+        phase: primary.phase,
+        round: primary.round,
+        seatId: primary.seatId,
+        arguments: args,
+        status: "requested",
+        startedAt: Date.now(),
+      })
+      event(run, "mcp_requested", `${primary.seatId} 请求调用 MCP：${name}`)
+    })
+  }
+  private async toolDecision(
+    id: string,
+    epoch: number,
+    toolCallId: string,
+    decision: "awaiting_approval" | "running" | "denied" | "failed",
+    reason?: string,
+  ): Promise<void> {
+    await this.store.update(id, run => {
+      const call = run.mcpCalls.find(item => item.id === toolCallId)
+      if (
+        !call ||
+        call.status === "succeeded" ||
+        call.status === "failed" ||
+        call.status === "denied" ||
+        call.status === "cancelled"
+      )
+        return
+      if (run.epoch !== epoch || run.status !== "running") {
+        call.status = "cancelled"
+        call.endedAt = Date.now()
+        call.error = "任务状态已改变，MCP 调用未继续"
+        event(run, "mcp_cancelled", `MCP 调用已取消：${call.toolName}`)
+        return
+      }
+      call.status = decision
+      call.error = reason?.slice(0, 2000)
+      if (decision === "denied" || decision === "failed") call.endedAt = Date.now()
+      event(
+        run,
+        `mcp_${decision}`,
+        decision === "awaiting_approval"
+          ? `MCP 调用等待 DSH 授权：${call.toolName}`
+          : decision === "running"
+            ? `MCP 调用已获授权并开始执行：${call.toolName}`
+            : decision === "denied"
+              ? `MCP 调用被 DSH 拒绝：${call.toolName}${reason ? `；${reason}` : ""}`
+              : `MCP 调用未能执行：${call.toolName}${reason ? `；${reason}` : ""}`,
+      )
+    })
+  }
+  private async toolReceipt(
+    id: string,
+    epoch: number,
+    primaryId: string,
+    toolCallId: string,
+    name: string,
+    content: string,
+    error?: string,
+  ): Promise<void> {
+    await this.store.update(id, run => {
+      const call = run.mcpCalls.find(item => item.id === toolCallId)
+      if (!call || call.status === "denied" || call.status === "cancelled") return
+      call.endedAt = Date.now()
+      call.status = error ? "failed" : "succeeded"
+      call.error = error?.slice(0, 2000)
+      if (!error && content.trim()) {
+        const primary = run.calls.find(item => item.id === primaryId)
+        const evidenceId = `mcp-${hash(`${run.id}:${toolCallId}`).slice(0, 20)}`
+        call.evidenceId = evidenceId
+        if (!run.mcpEvidence.some(item => item.id === evidenceId)) {
+          run.mcpEvidence.push({
+            id: evidenceId,
+            callId: toolCallId,
+            toolName: name,
+            issueIds: primary ? assignedIssues(run, primary.seatId) : [],
+            text: content.trim().slice(0, 30000),
+            retrievedAt: Date.now(),
+            verificationStatus: "unverified_mcp",
+          })
+        }
+      }
+      event(run, error ? "mcp_failed" : "mcp_completed", error ? `MCP 调用失败：${name}` : `MCP 结果已加入证据账本：${name}`)
+    })
   }
   private async seats(id: string, epoch: number, phase: Phase, controller: AbortController): Promise<void> {
     const snapshot = this.store.get(id)
@@ -782,7 +935,7 @@ export class DecisionEngine {
             assessment.coverageSatisfied &&
             assessment.unreviewedCriticalBlockerIds.length === 0 &&
             (assessment.allNeedEvidence ||
-              (assessment.stableBallots && assessment.noNewInformation && assessment.noFurtherDiscussion))
+              assessment.stagnantRounds >= 3)
           const closingCalls = draft.calls.length + draft.config.seats.length + 3 > draft.config.limits.maxCalls
           if (draft.finishRequested || softClosed || closingCalls || draft.round >= draft.config.limits.maxRounds) {
             draft.phase = "revise"
@@ -794,7 +947,7 @@ export class DecisionEngine {
                 : closingCalls
                   ? "预留最后两次调用用于修订与复核"
                   : softClosed
-                    ? "问题覆盖充分且连续两轮票型稳定、没有新增信息，转入修订；投票不用于宣布事实成立"
+                    ? "问题覆盖充分且连续三轮票型、证据与问题均无变化，Host 强制收敛并转入修订；席位的继续讨论意愿仅作参考"
                     : draft.round >= draft.config.limits.maxRounds
                       ? "已达到讨论轮数上限，保留票型与异议并转入修订"
                       : "按人工指令进入修订",

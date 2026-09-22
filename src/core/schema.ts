@@ -53,6 +53,7 @@ export const limitsSchema = z
     maxCostCny: z.number().positive().max(100000).nullable(),
     outputTokens: z.number().int().min(512).max(16000),
     callTimeoutSeconds: z.number().int().min(5).max(300),
+    maxMcpCalls: z.number().int().min(0).max(100).default(12),
   })
   .strict()
 export const runConfigSchema = z
@@ -293,7 +294,7 @@ export const usageSchema = z.object({
 export type Usage = z.infer<typeof usageSchema>
 export const callSchema = z.object({
   id,
-  purpose: z.enum(["review", "compaction"]).optional(),
+  purpose: z.enum(["review", "compaction", "tool_followup"]).optional(),
   contextSessionId: z.string().optional(),
   key: z.string(),
   phase: phaseSchema,
@@ -317,6 +318,29 @@ export const callSchema = z.object({
   promptHash: z.string(),
 })
 export type Call = z.infer<typeof callSchema>
+export const mcpCallSchema = z.object({
+  id: z.string().min(1).max(200),
+  primaryCallId: z.string().min(1).max(200).optional(),
+  toolName: z.string().startsWith("mcp__").max(300),
+  phase: phaseSchema,
+  round: z.number().int().nonnegative(),
+  seatId: id,
+  arguments: z.unknown(),
+  status: z.enum(["requested", "awaiting_approval", "running", "succeeded", "failed", "denied", "cancelled"]),
+  startedAt: z.number(),
+  endedAt: z.number().optional(),
+  error: z.string().max(2000).optional(),
+  evidenceId: id.optional(),
+})
+export const mcpEvidenceSchema = z.object({
+  id,
+  callId: z.string().min(1).max(200),
+  toolName: z.string().startsWith("mcp__").max(300),
+  issueIds: z.array(id).max(48),
+  text: z.string().min(1).max(30000),
+  retrievedAt: z.number(),
+  verificationStatus: z.literal("unverified_mcp"),
+})
 export const eventSchema = z.object({ id, at: z.number(), type: z.string(), text: z.string() })
 export const runSchema = z.object({
   schemaVersion: z.literal(1),
@@ -344,6 +368,8 @@ export const runSchema = z.object({
   calls: z.array(callSchema).max(400),
   issues: z.array(issueSchema).max(48),
   events: z.array(eventSchema),
+  mcpCalls: z.array(mcpCallSchema).max(500).default([]),
+  mcpEvidence: z.array(mcpEvidenceSchema).max(500).default([]),
   revisionResult: revisionSchema.optional(),
   verification: verificationSchema.optional(),
   humanDecision: z.object({ decision: z.enum(["adopt", "reject", "defer"]), reason: short, at: z.number() }).optional(),
@@ -366,6 +392,7 @@ export const REVIEW_MODES = [
       maxCostCny: null,
       outputTokens: 8000,
       callTimeoutSeconds: 90,
+      maxMcpCalls: 4,
     },
   },
   {
@@ -382,6 +409,7 @@ export const REVIEW_MODES = [
       maxCostCny: null,
       outputTokens: 8000,
       callTimeoutSeconds: 120,
+      maxMcpCalls: 12,
     },
   },
   {
@@ -398,13 +426,15 @@ export const REVIEW_MODES = [
       maxCostCny: null,
       outputTokens: 8000,
       callTimeoutSeconds: 180,
+      maxMcpCalls: 24,
     },
   },
   {
     id: "overnight",
     label: "持续评审",
     duration: "最长 8 小时",
-    description: "适合长时间无人值守运行，为持续交叉质询、格式重试和复杂材料处理预留充足额度。若观点提前收敛会提前完成。",
+    description:
+      "适合长时间无人值守运行，为持续交叉质询、格式重试和复杂材料处理预留充足额度。若观点提前收敛会提前完成。",
     limits: {
       maxRounds: 64,
       maxCalls: 360,
@@ -414,6 +444,7 @@ export const REVIEW_MODES = [
       maxCostCny: null,
       outputTokens: 10000,
       callTimeoutSeconds: 300,
+      maxMcpCalls: 60,
     },
   },
 ] as const satisfies ReadonlyArray<{

@@ -901,6 +901,15 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                     {metrics?.costCny === null ? "价格未配置 · 金额未核定" : `估算 ¥${metrics?.costCny.toFixed(4)}`}
                   </span>
                 </div>
+                <div>
+                  <small>MCP 补证</small>
+                  <strong>
+                    {run.mcpEvidence.length} <em>条材料</em>
+                  </strong>
+                  <span>
+                    调用 {run.mcpCalls.length} / {run.config.limits.maxMcpCalls}
+                  </span>
+                </div>
               </div>
               <nav className="phase-track" aria-label="执行阶段">
                 {PHASES.map((phase, index) => (
@@ -919,7 +928,7 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                       <p>逐问题显示覆盖、票型、证据状态和阻断票。多数意见不能把待核验判断变成事实。</p>
                     </div>
                     <span className={`badge ${deliberation.coverageSatisfied ? "good" : "warning"}`}>
-                      {deliberation.coverageSatisfied ? "覆盖达标" : "覆盖进行中"}
+                      {deliberation.coverageSatisfied ? "覆盖达标" : "覆盖进行中"} · 无新增 {deliberation.stagnantRounds}/3
                     </span>
                   </div>
                   <div className="ballot-legend">
@@ -934,6 +943,9 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                     </span>
                     <span>
                       <strong>证据</strong>：材料支持、冲突或缺失，不代表外部核验
+                    </span>
+                    <span>
+                      <strong>连续无新增</strong>：达到 3 轮后 Host 强制收敛，席位继续意愿仅作参考
                     </span>
                   </div>
                   {deliberation.issues.length === 0 ? (
