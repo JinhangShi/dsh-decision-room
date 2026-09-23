@@ -11,7 +11,12 @@ export function DecisionChatMessage(props: {
   if (!message) {
     return null
   }
-  const long = message.text.length > 2500
+  const preview =
+    message.preview ??
+    (message.kind === "review" && message.phase.startsWith("交叉讨论")
+      ? `${message.text.split("\n\n")[0]!.slice(0, 400)}\n\n以上为模型判断与建议；完整意见和证据引用可展开查看。`
+      : undefined)
+  const long = Boolean(preview) || message.text.length > 2500
   return (
     <article
       className="decision-message"
@@ -34,7 +39,7 @@ export function DecisionChatMessage(props: {
         </span>
       </div>
       <div className="decision-message-markdown" data-collapsed={long && !expanded ? "true" : undefined}>
-        <MarkdownText text={message.text} />
+        <MarkdownText text={!expanded && preview ? preview : message.text} />
       </div>
       {long && (
         <button

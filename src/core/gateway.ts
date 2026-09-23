@@ -7,12 +7,15 @@ export type WireMessage = { role: "user" | "assistant"; content: string }
 export type ContextDispatch = {
   purpose: "review" | "compaction" | "tool_followup"
   inputTokens: number
+  inputEstimate?: number
   outputTokens: number
   hash: string
   sessionId: string
 }
 export type ReviewContext = {
   run: Run
+  callId?: string
+  currentRun?(): Run
   phase: Phase
   seatId: string
   authorize(dispatch: ContextDispatch): Promise<string>

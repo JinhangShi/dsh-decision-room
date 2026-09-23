@@ -9,7 +9,7 @@ import { decisionMessages, decisionProgress } from "./messages.js"
 /** Persist role messages as native plugin conversation events; never impersonate a human or mutate the agent loop's turn counter. */
 export class DecisionTranscript {
   private pending = new Map<string, Promise<void>>()
-  private latest = new Map<string, Run>()
+  private latest = new Map<string, Map<string, Run>>()
   private owned = new Map<string, AgentHandle>()
   private unsubscribe: () => void
   private closing = false
@@ -31,7 +31,9 @@ export class DecisionTranscript {
       return
     }
     const key = run.scope.sessionId
-    this.latest.set(key, run)
+    const versions = this.latest.get(key) ?? new Map<string, Run>()
+    versions.set(run.id, run)
+    this.latest.set(key, versions)
     if (this.pending.has(key)) return
     const task = this.drain(key)
     this.pending.set(key, task)
@@ -40,14 +42,17 @@ export class DecisionTranscript {
       .finally(() => {
         if (this.pending.get(key) === task) {
           this.pending.delete(key)
+          const next = this.latest.get(key)?.values().next().value
+          if (next) this.schedule(next)
         }
       })
   }
   private async drain(key: string): Promise<void> {
     while (!this.closing) {
-      const run = this.latest.get(key)
+      const versions = this.latest.get(key)
+      const run = versions?.values().next().value
       if (!run) return
-      this.latest.delete(key)
+      versions!.delete(run.id)
       await this.publish(run)
     }
   }
@@ -78,7 +83,7 @@ export class DecisionTranscript {
       .filter(event => event.type === "decision-room/progress")
       .filter(event => event.data.progress.runId === run.id)
       .at(-1)
-    if (!previous || previous.data.progress.revision < run.revision) {
+    if (!previous || previous.data.progress.revision < run.revision || previous.data.progress.projectionVersion !== 2) {
       session.append("decision-room/progress", { initial: !previous, progress: decisionProgress(run, this.models) })
     }
     for (const message of decisionMessages(run, this.models)) {
@@ -90,7 +95,7 @@ export class DecisionTranscript {
     await this.services.sessions.flush(session)
   }
   async idle(): Promise<void> {
-    await Promise.allSettled([...this.pending.values()])
+    while (this.pending.size) await Promise.allSettled([...this.pending.values()])
   }
   async dispose(): Promise<void> {
     this.closing = true

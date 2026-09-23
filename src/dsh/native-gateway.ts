@@ -5,16 +5,18 @@ import {
   type GenerateOptions,
   type LlmRuntime,
   type Message,
+  type UserMessage,
   type StreamChunk,
 } from "@deepseek-ai/dsh-llm"
-import type { Agent, AgentHandle, AgentRegistry } from "@deepseek-ai/dsh-agent"
+import type { Agent, AgentHandle, AgentRegistry, PreStepDecision } from "@deepseek-ai/dsh-agent"
 import type { SessionId, SessionStore } from "@deepseek-ai/dsh-session"
 import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence"
 import type { TokenMeter } from "@deepseek-ai/dsh-token-meter"
 import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt"
-import { DecisionError, type Phase } from "../core/schema.js"
+import { DecisionError, type Phase, type Run } from "../core/schema.js"
 import { GatewayError, type ModelGateway, type ModelRequest, type ModelResponse } from "../core/gateway.js"
 import type { Model } from "../core/models.js"
+import { mcpBlockedReason } from "../core/mcp-status.js"
 
 export type NativeServices = {
   agentPresets: { mount(ctx: Agent["ctx"], id?: string): Promise<unknown> }
@@ -30,6 +32,7 @@ type Active = {
   primaryResponse?: ModelResponse
   error?: unknown
   dispatched: boolean
+  compactionInputs: number[]
 }
 const PROVIDER = "dsh-decision-room"
 const textContent = (message: Message) =>
@@ -40,6 +43,44 @@ const textContent = (message: Message) =>
 
 export function mcpToolsForPhase<T extends { name: string }>(tools: T[], phase: Phase | undefined): T[] {
   return phase === "discuss" ? tools.filter(tool => tool.name.startsWith("mcp__")) : []
+}
+
+export function reviewMessages(messages: UserMessage[]): UserMessage[] {
+  return messages.filter(
+    message =>
+      message.source.kind === "tool" ||
+      (message.source.kind === "plugin" && message.source.plugin === "dsh-decision-room"),
+  )
+}
+
+/** A UTF-8 density bound complements DSH's fixed four-characters heuristic for Chinese text. */
+export function nativeInputEstimate(system: string, messages: Message[], tools: GenerateOptions["tools"]): number {
+  return (
+    512 +
+    Math.ceil(
+      Buffer.byteLength(
+        JSON.stringify({
+          system,
+          messages: messages.map(message => ({ role: message.role, content: message.content })),
+          tools: tools ?? [],
+        }),
+        "utf8",
+      ) / 2,
+    )
+  )
+}
+
+export function calibratedInputEstimate(run: Run, modelKey: string, estimate: number): number {
+  const ratios = run.calls
+    .filter(call => call.modelKey === modelKey && call.inputEstimate && call.usage)
+    .map(call => call.usage!.inputTokens / call.inputEstimate!)
+  return Math.ceil(estimate * Math.max(1, ...ratios.map(ratio => (ratio > 1 ? ratio * 1.1 : 1))))
+}
+
+export function reviewSessionId(request: ModelRequest): SessionId {
+  const context = request.context!
+  // Each authorized attempt owns a fresh context. Its complete log remains durable.
+  return `session-dr-${context.run.id}-${context.seatId}-${context.callId ?? randomUUID()}` as SessionId
 }
 
 class DecisionAdapter extends LlmAdapter {
@@ -101,25 +142,38 @@ export class NativeGateway implements ModelGateway {
   }
   estimate(system: string, prompt: string, output: number): number {
     return (
-      this.services.tokenMeter.estimateMessage({
-        id: "estimate" as Message["id"],
-        role: "system",
-        content: [{ type: "text", text: system }],
-        source: { kind: "plugin", plugin: "dsh-decision-room" },
-      }) +
-      this.services.tokenMeter.estimateMessage({
-        id: "estimate-input" as Message["id"],
-        role: "user",
-        content: [{ type: "text", text: prompt }],
-        source: { kind: "plugin", plugin: "dsh-decision-room" },
-      }) +
-      512 +
-      output
+      Math.max(
+        nativeInputEstimate(
+          system,
+          [
+            {
+              id: "estimate" as Message["id"],
+              role: "user",
+              content: [{ type: "text", text: prompt }],
+              source: { kind: "plugin", plugin: "dsh-decision-room" },
+            },
+          ],
+          [],
+        ),
+        this.services.tokenMeter.estimateMessage({
+          id: "estimate" as Message["id"],
+          role: "system",
+          content: [{ type: "text", text: system }],
+          source: { kind: "plugin", plugin: "dsh-decision-room" },
+        }) +
+          this.services.tokenMeter.estimateMessage({
+            id: "estimate-input" as Message["id"],
+            role: "user",
+            content: [{ type: "text", text: prompt }],
+            source: { kind: "plugin", plugin: "dsh-decision-room" },
+          }) +
+          512,
+      ) + output
     )
   }
   private async agent(request: ModelRequest): Promise<Agent> {
     const context = request.context!
-    const id = `session-dr-${context.run.id}-${context.seatId}` as SessionId
+    const id = reviewSessionId(request)
     const owned = this.handles.get(id)?.agent
     if (owned) {
       return owned
@@ -140,6 +194,10 @@ export class NativeGateway implements ModelGateway {
           tools: {
             guard?(guard: (exec: { name: string }) => string | undefined): unknown
           }
+          on(
+            name: "agent/pre-step",
+            listener: (payload: unknown, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>,
+          ): unknown
           on(
             name: "tools/pre-execute",
             listener: (
@@ -168,7 +226,12 @@ export class NativeGateway implements ModelGateway {
           if (active.request.context.phase !== "discuss") {
             return { kind: "deny", reason: "独立首评隔离期间不允许外部工具" }
           }
-          await active.request.context.authorizeTool(String(exec.callId), exec.name, exec.arguments)
+          try {
+            await active.request.context.authorizeTool(String(exec.callId), exec.name, exec.arguments)
+          } catch (error) {
+            if (error instanceof DecisionError) return { kind: "deny", reason: error.message }
+            throw error
+          }
           try {
             // DSH remains the authority for the tool's actual permission. The model may
             // select any registered MCP, but it cannot bypass the host policy here.
@@ -204,10 +267,18 @@ export class NativeGateway implements ModelGateway {
           return next()
         })
         scoped.systemPrompt.section({ name: "decision-room-review", order: -1000, complete: true, text: system })
+        scoped.on("agent/pre-step", async (_payload, next) => {
+          const decision = await next()
+          return decision.kind === "enter" ? { ...decision, messages: reviewMessages(decision.messages) } : decision
+        })
         scoped.on("system-prompt/assemble", async (_assembly, _context, next) => {
           const result = await next()
           result.contexts = []
-          result.tools = mcpToolsForPhase(result.tools, this.active.get(id)?.request.context?.phase)
+          const context = this.active.get(id)?.request.context
+          const run = context?.currentRun?.() ?? context?.run
+          result.tools = mcpToolsForPhase(result.tools, context?.phase).filter(
+            tool => !run || (run.mcpCalls.length < run.config.limits.maxMcpCalls && !mcpBlockedReason(run, tool.name)),
+          )
           return result
         })
         scoped.on("agent/request", async ({ agent }, next) => {
@@ -259,29 +330,17 @@ export class NativeGateway implements ModelGateway {
     if (agent.status !== "idle" || this.active.has(agent.id)) {
       throw new DecisionError("BUSY", "评审角色正在处理上一条消息")
     }
-    const state: Active = { request, dispatched: false }
+    const state: Active = { request, dispatched: false, compactionInputs: [] }
     this.active.set(agent.id, state)
     const abort = () => agent.cancel({ kind: "user" })
     request.signal.addEventListener("abort", abort, { once: true })
     try {
       request.signal.throwIfAborted()
-      const data = JSON.parse(request.prompt) as Record<string, unknown>
-      if (agent.session.deriveMessages().length > 0) {
-        const { title, question, objective, constraints } = request.context.run.brief
-        data.brief = {
-          title,
-          question,
-          objective,
-          constraints,
-          note: "完整原始方案和材料已在本角色 DSH 会话中提交；以当前硬约束为准。",
-        }
-      }
-      const prompt = JSON.stringify(data)
       agent.followup({
         id: randomUUID() as Message["id"],
         role: "user",
         source: { kind: "plugin", plugin: "dsh-decision-room" },
-        content: [{ type: "text", text: prompt }],
+        content: [{ type: "text", text: request.prompt }],
       })
       await agent.whenIdle()
       await this.services.sessions.flush(agent.session)
@@ -298,6 +357,9 @@ export class NativeGateway implements ModelGateway {
     } finally {
       request.signal.removeEventListener("abort", abort)
       this.active.delete(agent.id)
+      const handle = this.handles.get(agent.id)
+      this.handles.delete(agent.id)
+      await handle?.dispose()
     }
   }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -314,12 +376,28 @@ export class NativeGateway implements ModelGateway {
     }
     const purpose = options.purpose === "compaction" ? "compaction" : state.dispatched ? "tool_followup" : "review"
     const output = Math.min(options.maxTokens ?? request.maxOutputTokens, request.maxOutputTokens)
-    const input =
+    const heuristic =
       this.estimate(options.system ?? "", "", 0) +
       options.messages.reduce((total, message) => total + this.services.tokenMeter.estimateMessage(message), 0)
+    const inputEstimate = Math.max(
+      heuristic,
+      nativeInputEstimate(options.system ?? "", options.messages, options.tools),
+    )
+    const input = calibratedInputEstimate(
+      request.context!.currentRun?.() ?? request.context!.run,
+      request.model.key,
+      inputEstimate,
+    )
     let receiptId: string | undefined
     let response: ModelResponse | undefined
     try {
+      if (purpose === "compaction") {
+        const previous = state.compactionInputs.at(-1)
+        if (state.compactionInputs.length >= 2 || (previous !== undefined && input >= previous * 0.9)) {
+          throw new DecisionError("CONTEXT", "连续压缩未有效缩短上下文；已停止重复压缩，原始材料和阶段结果已保留")
+        }
+        state.compactionInputs.push(input)
+      }
       if (input + output > request.model.contextTokens) {
         throw new DecisionError(
           "CONTEXT",
@@ -329,6 +407,7 @@ export class NativeGateway implements ModelGateway {
       receiptId = await request.context!.authorize({
         purpose,
         inputTokens: input,
+        inputEstimate,
         outputTokens: output,
         hash: createHash("sha256").update(JSON.stringify(options.messages)).digest("hex"),
         sessionId: String(options.sessionId),

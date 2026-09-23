@@ -307,6 +307,7 @@ export const callSchema = z.object({
   startedAt: z.number(),
   endedAt: z.number().optional(),
   reservedTokens: z.number(),
+  inputEstimate: z.number().nonnegative().optional(),
   reservedCost: z.number().nullable(),
   accountedTokens: z.number(),
   accountedCost: z.number().nullable(),
@@ -346,6 +347,12 @@ export const mcpEvidenceSchema = z.object({
   verificationStatus: z.literal("unverified_mcp"),
 })
 export const eventSchema = z.object({ id, at: z.number(), type: z.string(), text: z.string() })
+const closingAllocationSchema = z.object({
+  tokens: z.number().nonnegative(),
+  calls: z.number().int().positive(),
+  durationMs: z.number().nonnegative(),
+  costCny: z.number().nonnegative().nullable(),
+})
 export const runSchema = z.object({
   schemaVersion: z.literal(1),
   id,
@@ -368,6 +375,14 @@ export const runSchema = z.object({
   createdAt: z.number(),
   updatedAt: z.number(),
   stopReason: z.string().optional(),
+  stopCode: z.string().optional(),
+  // A durable hold, separate from spent usage. Released only to its closing phase.
+  closingReserve: z
+    .object({
+      revise: closingAllocationSchema,
+      verify: closingAllocationSchema,
+    })
+    .optional(),
   finishRequested: z.boolean(),
   calls: z.array(callSchema).max(400),
   issues: z.array(issueSchema).max(48),

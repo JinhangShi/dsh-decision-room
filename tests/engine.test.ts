@@ -337,7 +337,7 @@ describe("持久化、并发额度与停止", () => {
     expect(paused.mcpCalls.every(call => call.endedAt !== undefined)).toBe(true)
   })
 
-  it("并发调用前原子预留，不会先发请求再发现额度不足", async () => {
+  it("预算不足以同时保护收尾和首评时，不先发请求再发现额度不足", async () => {
     let calls = 0
     const demo = new DemoGateway(100)
     const { engine } = await setup({
@@ -362,10 +362,10 @@ describe("持久化、并发额度与停止", () => {
     await engine.control(updated.id, updated.scope, "start", updated.revision)
     await engine.idle(updated.id)
     const run = engine.store.get(updated.id)
-    expect(calls).toBe(1)
+    expect(calls).toBe(0)
     expect(run.status).toBe("paused")
     expect(spent(run).tokens).toBeLessThanOrEqual(run.config.limits.tokenBudget)
-    expect(run.calls[0]?.accounting).toBe("uncertain")
+    expect(run.stopCode).toBe("CLOSING_RESERVE")
   })
   it("暂停后迟到结果不写入结论，恢复后跳过已完成调用", async () => {
     let resolveLate: ((response: ModelResponse) => void) | undefined

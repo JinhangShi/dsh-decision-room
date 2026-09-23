@@ -84,9 +84,17 @@ export function DecisionProgressCard({
   }[value.status]
   const failedCalls = value.calls.filter(call => call.status === "failed" || call.status === "interrupted").length
   const interruptedCalls = value.calls.filter(call => call.status === "interrupted").length
-  const submittedSeats = value.seats.filter(seat =>
-    value.calls.some(call => call.seatId === seat.id && call.status === "succeeded"),
-  ).length
+  const currentSeatCall = (seatId: string) =>
+    value.calls
+      .filter(
+        call =>
+          call.seatId === seatId &&
+          (call.purpose === undefined || call.purpose === "review") &&
+          call.round === value.round &&
+          call.phase === (value.round > 0 ? "交叉讨论" : "独立评审"),
+      )
+      .at(-1)
+  const submittedSeats = value.seats.filter(seat => currentSeatCall(seat.id)?.status === "succeeded").length
   const callStatus = {
     running: { label: "调用中", mark: "..." },
     succeeded: { label: "已完成", mark: "✓" },
@@ -113,14 +121,14 @@ export function DecisionProgressCard({
       </p>
       {compact ? (
         <p className="decision-seat-summary">
-          {submittedSeats}/{value.seats.length} 个席位已提交 · {value.calls.length} 次调用
+          本轮 {submittedSeats}/{value.seats.length} 个席位已提交 · {value.calls.length} 次调用
           {failedCalls ? ` · ${failedCalls} 次需关注` : ""}
           {mcp.sources ? ` · ${mcp.sources} 条 MCP 材料` : ""}
         </p>
       ) : (
         <div className="decision-seats">
           {value.seats.map(seat => {
-            const call = value.calls.filter(call => call.seatId === seat.id).at(-1)
+            const call = currentSeatCall(seat.id)
             return (
               <div key={seat.id}>
                 <strong>{seat.name}</strong>
@@ -292,7 +300,18 @@ export function DecisionProgressCard({
         </details>
       )}
       {value.stopReason && <p role="status">{value.stopReason}</p>}
-      {value.status === "paused" && interruptedCalls > 0 && (
+      {value.status === "paused" && value.budgetBlocked && (
+        <div className="decision-recovery" role="note">
+          <strong>当前额度无法继续评审</strong>
+          <span>阶段报告已保留，尚未完成独立复核。请先查看报告和用量；调整额度需要你的明确指令。</span>
+          {value.reportUrl && (
+            <a href={value.reportUrl} target="_blank" rel="noreferrer">
+              查看并导出阶段报告
+            </a>
+          )}
+        </div>
+      )}
+      {value.status === "paused" && !value.budgetBlocked && interruptedCalls > 0 && (
         <div className="decision-recovery" role="note">
           <strong>需要你确认后重试</strong>
           <span>
@@ -348,7 +367,9 @@ export function DecisionProgressCard({
               <button onClick={() => action("请结束当前讨论并生成修订与复核")}>进入修订</button>
             </>
           )}
-          {value.status === "paused" && <button onClick={() => action("请在原预算内从检查点继续评审")}>继续</button>}
+          {value.status === "paused" && !value.budgetBlocked && (
+            <button onClick={() => action("请在原预算内从检查点继续评审")}>继续</button>
+          )}
           {value.status === "completed" && (
             <button onClick={() => action("请根据以下新增意见进行第二次评审；先等我补充具体意见")}>补充修订意见</button>
           )}

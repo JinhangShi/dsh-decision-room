@@ -1,8 +1,8 @@
 import type {} from "@deepseek-ai/dsh-session"
 import type { Model } from "../core/models.js"
 import { reportMarkdown } from "../core/report.js"
-import { spent } from "../core/budget.js"
-import { assessDeliberation } from "../core/deliberation.js"
+import { budgetBlocked, spent } from "../core/budget.js"
+import { assessDeliberation, discussionDelta } from "../core/deliberation.js"
 import {
   ballotInterpretationSchema,
   isReviewCall,
@@ -23,10 +23,12 @@ export type DecisionMessage = {
   model: string
   phase: string
   text: string
+  preview?: string
   at: number
   kind: "brief" | "review" | "ballot" | "report" | "notice"
 }
 export type DecisionProgress = {
+  projectionVersion?: number
   id: string
   runId: string
   revision: number
@@ -41,6 +43,8 @@ export type DecisionProgress = {
   maxRounds: number
   mcp?: { calls: number; limit: number; sources: number; failed: number }
   stopReason?: string
+  budgetBlocked?: boolean
+  reportUrl?: string
   seats: Array<{ id: string; name: string; model: string }>
   ballot?: {
     coverageSatisfied: boolean
@@ -158,6 +162,7 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
     }
   })
   return {
+    projectionVersion: 2,
     id: `${run.id}:progress`,
     runId: run.id,
     revision: run.revision,
@@ -177,6 +182,8 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
       failed: run.mcpCalls.filter(item => ["failed", "denied", "cancelled"].includes(item.status)).length,
     },
     ballotHistory,
+    budgetBlocked: budgetBlocked(run),
+    reportUrl: `/decision-room/?${new URLSearchParams({ sessionId: run.scope.sessionId, workspaceId: run.scope.workspaceId })}`,
     ...(run.stopReason ? { stopReason: run.stopReason } : {}),
     seats: run.config.seats.map(seat => ({ id: seat.id, name: seat.name, model: modelLabel(seat.modelKey) })),
     ...(assessment
@@ -237,17 +244,14 @@ export function decisionMessages(run: Run, models: Model[]): DecisionMessage[] {
     const responded = new Set(calls.flatMap(call => readDebateResult(call.result).responses.map(item => item.issueId)))
     if (!run.issues.length || run.issues.some(issue => !responded.has(issue.id))) return undefined
     const assessment = assessDeliberation(run, round)
-    const interpretationCall = run.calls.find(
-      call => isReviewCall(call) && call.phase === "interpret" && call.round === round && call.status === "succeeded",
-    )
-    const interpretation = interpretationCall ? ballotInterpretationSchema.parse(interpretationCall.result) : undefined
+    const delta = discussionDelta(run, round)
     const submittedSeats = new Set(calls.map(call => call.seatId)).size
     const cell = (value: string) => value.replaceAll("|", "\\|").replaceAll("\n", " ")
     const rows = assessment.issues.map(ballot => {
       const issue = run.issues.find(item => item.id === ballot.issueId)!
       return `| ${cell(issue.title)} | ${ballot.reviewerCount} 席（最低 ${ballot.requiredReviewers}） · ${ballot.modelFamilyCount} 模型族（最低 ${ballot.requiredModelFamilies}） | ${ballot.blockingVotes} | 维持 ${ballot.positions.maintain} · 修改 ${ballot.positions.revise} · 否决 ${ballot.positions.reject} · 弃权 ${ballot.positions.abstain} · 待补证 ${ballot.positions.needs_evidence} | 支持 ${ballot.evidence.supported} · 冲突 ${ballot.evidence.conflicting} · 缺失 ${ballot.evidence.missing} |`
     })
-    const at = (interpretationCall?.endedAt ?? Math.max(...calls.map(call => call.endedAt ?? call.startedAt))) + 1
+    const at = Math.max(...calls.map(call => call.endedAt ?? call.startedAt)) + 1
     return make(
       `ballot-round-${round}`,
       "Host 表决",
@@ -256,7 +260,7 @@ export function decisionMessages(run: Run, models: Model[]): DecisionMessage[] {
 
 本轮完成后共有 ${submittedSeats} 个席位提交回应。下表保留每个席位截至本轮的最新一票；后续改票会出现在下一轮快照中，不改写本轮记录。
 
-${interpretation ? `#### 主持解读：${interpretation.headline}\n\n${interpretation.summary}\n\n- **相对上一轮：**${interpretation.changesSincePrevious}\n- **建议下一步：**${interpretation.nextStep}\n- **注意：**${interpretation.caveat}\n` : "主持解读尚未生成；以下为 Host 确定性统计。\n"}
+Host 记录：新增证据 ${delta.newEvidenceIds.length} 项；新增或改变立场 ${delta.changedBallots.length} 项。主持解读将在完成后单独追加，不改写本轮快照。
 
 | 议题 | 独立覆盖 | 阻断票 | 当前立场 | 证据状态 |
 | --- | --- | ---: | --- | --- |
@@ -280,7 +284,8 @@ ${rows.join("\n")}
         const value = readDebateResult(call.result)
         text = `${value.summary}\n\n${value.responses.map(response => `### ${response.issueId} · ${{ maintain: "维持判断", revise: "调整判断", reject: "否决当前方案", abstain: "弃权", needs_evidence: "需要补证" }[response.position]}\n\n证据状态：${{ supported: "有材料支持", conflicting: "材料冲突", missing: "材料缺失" }[response.evidenceStatus]}${response.blocking ? " · 阻断项" : ""}\n\n${response.reasoning}\n\n修改建议：${response.proposedChange}\n\n改变意见的条件：${response.whatWouldChangeMind}\n\n材料引用：${response.evidenceIds.join("、") || "待补证"}`).join("\n\n")}`
       } else if (call.phase === "interpret") {
-        continue
+        const value = ballotInterpretationSchema.parse(call.result)
+        text = `### 主持解读：${value.headline}\n\n${value.summary}\n\n- **相对上一轮：**${value.changesSincePrevious}\n- **建议下一步：**${value.nextStep}\n- **注意：**${value.caveat}\n\n关联：第 ${call.round} 轮 Host 表决快照。模型建议不改变 Host 运行状态。`
       } else if (call.phase === "revise") {
         const value = revisionSchema.parse(call.result)
         text = `${value.summary}\n\n${value.fullPlan}\n\n修改对应：\n${value.changes.map(change => `- ${change.issueId}：${change.change}；理由：${change.reason}`).join("\n")}`
@@ -302,6 +307,16 @@ ${rows.join("\n")}
           call.returnedModel ?? models.find(model => model.key === call.modelKey)?.label ?? call.modelKey,
         ),
       )
+      if (call.phase === "discuss") {
+        const value = readDebateResult(call.result)
+        const changed = new Set(
+          discussionDelta(run, call.round)
+            .changedBallots.filter(item => item.seatId === call.seatId)
+            .map(item => item.issueId),
+        )
+        result.at(-1)!.preview =
+          `本席本轮回应 ${value.responses.length} 项；新增或改变立场 ${changed.size} 项；阻断 ${value.responses.filter(item => item.blocking).length} 项。\n\n${value.summary.slice(0, 400)}\n\n以上为模型判断与建议；证据是否成立仍需核验。`
+      }
     }
     const rounds = [
       ...new Set(
@@ -326,6 +341,25 @@ ${rows.join("\n")}
         ),
       )
     }
+  }
+  if (["paused", "cancelled", "failed"].includes(run.status)) {
+    const event = run.events.findLast(item => ["paused", "pause", "cancel", "recovered"].includes(item.type))
+    if (event)
+      result.push(
+        make(
+          `stage-report-${event.id}`,
+          "阶段报告",
+          "尚未完成独立复核",
+          reportMarkdown(
+            run.phase === "independent"
+              ? { ...run, calls: run.calls.map(call => ({ ...call, result: undefined })) }
+              : run,
+            models,
+          ),
+          "report",
+          event.at + 1,
+        ),
+      )
   }
   for (const event of run.events.filter(event =>
     [

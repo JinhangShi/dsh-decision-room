@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react"
-import { activeElapsed, spent } from "../core/budget.js"
+import { activeElapsed, budgetBlocked, spent } from "../core/budget.js"
 import { assessDeliberation } from "../core/deliberation.js"
 import type { Model } from "../core/models.js"
 import {
@@ -928,7 +928,8 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                       <p>逐问题显示覆盖、票型、证据状态和阻断票。多数意见不能把待核验判断变成事实。</p>
                     </div>
                     <span className={`badge ${deliberation.coverageSatisfied ? "good" : "warning"}`}>
-                      {deliberation.coverageSatisfied ? "覆盖达标" : "覆盖进行中"} · 无新增 {deliberation.stagnantRounds}/3
+                      {deliberation.coverageSatisfied ? "覆盖达标" : "覆盖进行中"} · 无新增{" "}
+                      {deliberation.stagnantRounds}/3
                     </span>
                   </div>
                   <div className="ballot-legend">
@@ -1004,7 +1005,13 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                 </section>
               )}
               {run.stopReason && <div className="notice">{run.stopReason}</div>}
-              {run.status === "paused" && hasInterruptedCalls && (
+              {run.status === "paused" && budgetBlocked(run) && (
+                <div className="notice recovery-notice" role="note">
+                  <strong>当前额度无法继续评审</strong>
+                  <p>可直接导出阶段报告，尚未完成独立复核。请先核对用量；额度只能按你的明确指令调整。</p>
+                </div>
+              )}
+              {run.status === "paused" && !budgetBlocked(run) && hasInterruptedCalls && (
                 <div className="notice recovery-notice" role="note">
                   <strong>需要你确认后重试</strong>
                   <p>为避免上游重复计费，中断或超时不会自动重试。点击“从检查点继续”后，只重试未完成步骤。</p>
@@ -1049,7 +1056,7 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                     </button>
                   </>
                 )}
-                {run.status === "paused" && (
+                {run.status === "paused" && !budgetBlocked(run) && (
                   <button
                     className="primary"
                     disabled={busy}

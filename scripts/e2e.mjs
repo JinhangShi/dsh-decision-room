@@ -52,17 +52,26 @@ try {
       "为企业服务产品建立可逆的付费试点。先访谈目标客户并确认需要解决的问题，明确交付范围和数据授权，再开展有限样本测试。记录实际客户反馈、交付投入和持续使用情况，达到预设标准后由人工决定是否扩大。所有指标暂不填虚构数字。",
     )
   await page.getByRole("button", { name: "下一步：配置成员" }).click()
-  await page.getByRole("button", { name: "快速评审" }).click()
+  await page.getByRole("radio", { name: /快速评审/ }).click()
   await mkdir("test-results", { recursive: true })
   await page.screenshot({ path: "test-results/setup-desktop.png", fullPage: true })
   await page.getByRole("button", { name: "创建并开始评审" }).click()
   await page.getByRole("button", { name: "补充意见，创建下一版" }).waitFor({ timeout: 30000 })
   assert.equal(await page.getByRole("alert").count(), 0)
-  assert.ok((await page.locator(".message").count()) >= 11)
+  assert.ok((await page.locator(".message").count()) >= 17)
   await page.screenshot({ path: "test-results/discussion-desktop.png", fullPage: true })
   const sidebar = await browser.newPage({ viewport: { width: 420, height: 900 } })
+  // Reading existing progress must remain possible after gateway credentials are removed.
+  await sidebar.route("**/decision-room/api/bootstrap", async route => {
+    const response = await route.fetch()
+    const bootstrap = await response.json()
+    await route.fulfill({
+      response,
+      json: { ...bootstrap, mode: "live", gateway: { configured: false, baseUrl: "" } },
+    })
+  })
   await sidebar.goto(`${origin}/decision-room/?layout=progress`)
-  await sidebar.locator(".decision-ballot-list article").first().waitFor()
+  await sidebar.locator(".decision-ballot-list article:visible").first().waitFor()
   assert.ok((await sidebar.locator(".decision-ballot-list article").count()) > 0)
   assert.equal(
     await sidebar.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
@@ -113,9 +122,10 @@ try {
         success: true,
         checked: [
           "创建四角色评审",
-          "11 次完整模拟调用",
+          "17 次完整模拟调用",
           "问题台账",
           "右侧栏表决详情与窄屏布局",
+          "网关未配置仍可查看已有进度",
           "完整修订与复核",
           "人工采纳",
           "HTML 下载",

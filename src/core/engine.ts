@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
-import { activeElapsed, cost, estimateTokens, reserveCheck, settle, spent } from "./budget.js"
+import { activeElapsed, closingHold, cost, estimateTokens, reserveCheck, settle, spent } from "./budget.js"
+import { mcpBlockedReason, mcpFailureKind } from "./mcp-status.js"
 import { GatewayError, type ModelGateway, type ModelResponse, type ContextDispatch } from "./gateway.js"
 import { getModel, type Model } from "./models.js"
 import { assignedIssues, makePrompt, parseResult, SYSTEM } from "./prompts.js"
@@ -107,6 +108,44 @@ export class DecisionEngine {
     return this.gateway.managedContext ? "dsh" : "standalone"
   }
 
+  private reserveClosing(run: Run): void {
+    const limits = run.config.limits
+    const calls = Math.max(1, Math.min(3, Math.floor((limits.maxCalls - run.config.seats.length - 1) / 2)))
+    const allocation = (phase: "revise" | "verify") => {
+      const model = getModel(this.models, phase === "revise" ? run.config.moderatorKey : run.config.verifierKey)
+      const prompt = makePrompt(run, phase, phase === "revise" ? "editor" : "verifier")
+      const estimate =
+        this.gateway.estimate?.(SYSTEM, prompt, limits.outputTokens) ??
+        estimateTokens(SYSTEM, prompt, limits.outputTokens)
+      const tokens = Math.max(
+        Math.ceil(limits.tokenBudget * 0.1),
+        estimate + (phase === "verify" && !run.revisionResult ? limits.outputTokens * 4 : 0),
+      )
+      return {
+        tokens,
+        calls,
+        durationMs: Math.min(calls * limits.callTimeoutSeconds * 1000, limits.maxDurationMinutes * 6000),
+        costCny: cost(model, tokens, tokens),
+      }
+    }
+    run.closingReserve = { revise: allocation("revise"), verify: allocation("verify") }
+  }
+
+  private async closeForBudget(id: string, epoch: number, phase: Phase, error: unknown): Promise<boolean> {
+    if (
+      !["discuss", "interpret"].includes(phase) ||
+      !(error instanceof DecisionError) ||
+      !["CLOSING_RESERVE", "TOKEN_LIMIT", "CALL_LIMIT", "TIME_LIMIT", "COST_LIMIT"].includes(error.code)
+    )
+      return false
+    await this.store.update(id, run => {
+      if (run.status !== "running" || run.epoch !== epoch || run.finishRequested) return
+      run.finishRequested = true
+      event(run, "discussion_closed", "讨论额度不足，保留当前结果；剩余额度只用于修订与独立复核")
+    })
+    return true
+  }
+
   async initialize(): Promise<void> {
     await this.store.initialize()
     const unattended = new Set<string>()
@@ -138,6 +177,7 @@ export class DecisionEngine {
           current.status = "running"
           current.epoch += 1
           current.activeSince = Date.now()
+          this.reserveClosing(current)
           delete current.stopReason
           event(current, "auto_resume", "持续评审已从检查点自动续跑")
         })
@@ -206,6 +246,7 @@ export class DecisionEngine {
       mcpEvidence: [],
       mode: this.mode,
     }
+    this.reserveClosing(run)
     event(
       run,
       "created",
@@ -256,10 +297,12 @@ export class DecisionEngine {
             throw new DecisionError("RUN_LIMIT", "当前 Profile 最多同时运行两个决策任务", 409)
           }
           reserveCheck(run, 0, 0)
+          this.reserveClosing(run)
           run.status = "running"
           run.epoch += 1
           run.activeSince = Date.now()
           delete run.stopReason
+          delete run.stopCode
           event(run, action, "已授权在当前模型、材料、时间与预算内持续评审")
         } else if (action === "finish") {
           if (run.status !== "running") {
@@ -311,6 +354,8 @@ export class DecisionEngine {
         }
         event(run, "limits_changed", `用户调整限制：${JSON.stringify(run.config.limits)} → ${JSON.stringify(limits)}`)
         run.config.limits = limits
+        this.reserveClosing(run)
+        delete run.stopCode
       },
       revision,
     )
@@ -347,7 +392,12 @@ export class DecisionEngine {
     this.controllers.set(id, controller)
     const job = this.drive(id, epoch, controller)
       .catch(async error => {
-        await this.pauseForError(id, epoch, safeError(error)).catch(() => {})
+        await this.pauseForError(
+          id,
+          epoch,
+          safeError(error),
+          error instanceof DecisionError ? error.code : undefined,
+        ).catch(() => {})
       })
       .finally(() => {
         this.jobs.delete(id)
@@ -376,7 +426,7 @@ export class DecisionEngine {
     await Promise.allSettled([...this.jobs.values()])
     await this.gateway.dispose?.()
   }
-  private async pauseForError(id: string, epoch: number, reason: string): Promise<void> {
+  private async pauseForError(id: string, epoch: number, reason: string, code?: string): Promise<void> {
     await this.store.update(id, run => {
       if (run.status !== "running" || run.epoch !== epoch) {
         return
@@ -385,6 +435,8 @@ export class DecisionEngine {
       run.epoch += 1
       run.status = "paused"
       run.stopReason = reason
+      run.stopCode = code
+      cancelActiveMcpCalls(run, reason)
       event(run, "paused", reason)
     })
     this.controllers.get(id)?.abort()
@@ -446,6 +498,7 @@ export class DecisionEngine {
     if (snapshot.status !== "running" || snapshot.epoch !== epoch) {
       return
     }
+    if (phase === "discuss" && snapshot.finishRequested) return
     const model = getModel(this.models, modelKey)
     const prompt = makePrompt(snapshot, phase, seatId)
     const tokens =
@@ -460,7 +513,8 @@ export class DecisionEngine {
       if (run.status !== "running" || run.epoch !== epoch) {
         throw new DecisionError("STALE", "任务状态已改变")
       }
-      reserveCheck(run, tokens, reservedCost)
+      if (phase === "discuss" && run.finishRequested) return
+      reserveCheck(run, tokens, reservedCost, phase)
       const attempts = run.calls.filter(call => call.key === key).length
       if (attempts >= 3) {
         const last = run.calls.filter(call => call.key === key).at(-1)
@@ -490,7 +544,13 @@ export class DecisionEngine {
       })
       event(run, "call_started", `${phase} · ${seatId} · ${model.label}`)
     })
-    const remainingMs = Math.max(1, snapshot.config.limits.maxDurationMinutes * 60000 - activeElapsed(snapshot))
+    if (!this.store.get(id).calls.some(call => call.id === callId)) return
+    const remainingMs = Math.max(
+      1,
+      snapshot.config.limits.maxDurationMinutes * 60000 -
+        activeElapsed(snapshot) -
+        closingHold(snapshot, phase).durationMs,
+    )
     const signal = AbortSignal.any([
       controller.signal,
       AbortSignal.timeout(Math.ceil(Math.min(remainingMs, snapshot.config.limits.callTimeoutSeconds * 1000))),
@@ -506,6 +566,8 @@ export class DecisionEngine {
           signal,
           context: {
             run: snapshot,
+            callId,
+            currentRun: () => this.store.get(id),
             phase,
             seatId,
             authorize: dispatch => this.authorizeDispatch(id, epoch, callId, model, dispatch),
@@ -541,16 +603,12 @@ export class DecisionEngine {
           used.costCny !== null &&
           used.costCny > updated.config.limits.maxCostCny)
       ) {
-        if (phase === "discuss" || phase === "interpret") {
-          await this.store.update(id, run => {
-            if (run.status === "running" && run.epoch === epoch) {
-              run.phase = "revise"
-              event(run, "discussion_closed", "已达到 Token 或金额上限；保留当前快照并转入修订与独立复核")
-            }
-          })
-        } else {
-          await this.pauseForError(id, epoch, "上游报告用量超过预留／总预算，已停止后续请求，请核对网关计费")
-        }
+        await this.pauseForError(
+          id,
+          epoch,
+          "上游报告用量超过总预算；已停止后续请求，可导出尚未完成复核的阶段报告",
+          "BUDGET_EXCEEDED",
+        )
       }
     } catch (error) {
       const receipt = response ?? (error instanceof GatewayError ? error.response : undefined)
@@ -564,6 +622,14 @@ export class DecisionEngine {
         event(run, "call_failed", `${phase} · ${seatId}：${call.error}`)
       })
       const failed = this.store.get(id)
+      if (await this.closeForBudget(id, epoch, phase, error)) return
+      if (
+        error instanceof DecisionError &&
+        ["CONTEXT", "CLOSING_RESERVE", "TOKEN_LIMIT", "CALL_LIMIT", "COST_LIMIT", "TIME_LIMIT"].includes(error.code)
+      ) {
+        await this.pauseForError(id, epoch, error.message, error.code)
+        return
+      }
       const attempts = failed.calls.filter(call => call.key === key).length
       if (
         (retryableOutputError(error) || !(error instanceof GatewayError)) &&
@@ -593,7 +659,7 @@ export class DecisionEngine {
         })
         return
       }
-      await this.pauseForError(id, epoch, safeError(error))
+      await this.pauseForError(id, epoch, safeError(error), error instanceof DecisionError ? error.code : undefined)
     }
   }
   private async authorizeDispatch(
@@ -609,14 +675,17 @@ export class DecisionEngine {
         throw new DecisionError("STALE", "任务已停止，未发起上下文请求")
       }
       const primary = run.calls.find(call => call.id === primaryId)!
+      if (primary.phase === "discuss" && run.finishRequested)
+        throw new DecisionError("CLOSING_RESERVE", "已安排收尾，停止后续讨论、工具续答和压缩请求")
       const tokens = dispatch.inputTokens + dispatch.outputTokens
       const cny = cost(model, dispatch.inputTokens, dispatch.outputTokens)
       const check =
         dispatch.purpose === "review" ? { ...run, calls: run.calls.filter(call => call.id !== primaryId) } : run
-      reserveCheck(check, tokens, cny)
+      reserveCheck(check, tokens, cny, primary.phase)
       if (dispatch.purpose === "review") {
         Object.assign(primary, {
           reservedTokens: tokens,
+          inputEstimate: dispatch.inputEstimate,
           reservedCost: cny,
           accountedTokens: tokens,
           accountedCost: cny,
@@ -636,6 +705,7 @@ export class DecisionEngine {
           endedAt: undefined,
           usage: undefined,
           reservedTokens: tokens,
+          inputEstimate: dispatch.inputEstimate,
           reservedCost: cny,
           accountedTokens: tokens,
           accountedCost: cny,
@@ -684,7 +754,12 @@ export class DecisionEngine {
       used.tokens > run.config.limits.tokenBudget ||
       (run.config.limits.maxCostCny !== null && (used.costCny === null || used.costCny > run.config.limits.maxCostCny))
     ) {
-      await this.pauseForError(id, epoch, "上下文处理用量超过预算，已暂停后续请求")
+      await this.pauseForError(
+        id,
+        epoch,
+        "上下文处理用量超过预算，已暂停后续请求；可导出尚未完成复核的阶段报告",
+        "BUDGET_EXCEEDED",
+      )
     }
   }
   private async authorizeTool(
@@ -699,10 +774,13 @@ export class DecisionEngine {
       if (run.status !== "running" || run.epoch !== epoch) throw new DecisionError("STALE", "任务已停止")
       if (!name.startsWith("mcp__")) throw new DecisionError("TOOL_DENIED", "决策席只能调用当前 DSH 已注册的 MCP 工具")
       if (run.mcpCalls.some(call => call.id === toolCallId)) return
+      const blocked = mcpBlockedReason(run, name)
+      if (blocked) throw new DecisionError("MCP_UNAVAILABLE", blocked)
       const primary = run.calls.find(call => call.id === primaryId)
       if (!primary || primary.phase !== "discuss") {
         throw new DecisionError("TOOL_DENIED", "首轮独立评审公开前不允许调用 MCP 工具")
       }
+      if (run.finishRequested) throw new DecisionError("MCP_UNAVAILABLE", "已安排收尾，停止新的外部补证请求")
       if (run.mcpCalls.length >= run.config.limits.maxMcpCalls) {
         throw new DecisionError("MCP_LIMIT", "已达到本任务 MCP 调用次数上限")
       }
@@ -779,7 +857,14 @@ export class DecisionEngine {
         const primary = run.calls.find(item => item.id === primaryId)
         const evidenceId = `mcp-${hash(`${run.id}:${toolCallId}`).slice(0, 20)}`
         call.evidenceId = evidenceId
-        if (!run.mcpEvidence.some(item => item.id === evidenceId)) {
+        const existing = run.mcpEvidence.find(
+          item => item.toolName === name && item.text === content.trim().slice(0, 30000),
+        )
+        if (existing) {
+          call.evidenceId = existing.id
+          const issueIds = primary ? assignedIssues(run, primary.seatId) : []
+          existing.issueIds = [...new Set([...existing.issueIds, ...issueIds])]
+        } else {
           run.mcpEvidence.push({
             id: evidenceId,
             callId: toolCallId,
@@ -794,7 +879,9 @@ export class DecisionEngine {
       event(
         run,
         error ? "mcp_failed" : "mcp_completed",
-        error ? `MCP 调用失败：${name}` : `MCP 结果已加入证据账本：${name}`,
+        error
+          ? `MCP 调用失败：${name}；${mcpFailureKind(error) === "authentication" ? "认证失效，已停止该连接器的重复尝试；修复后可明确继续" : mcpFailureKind(error) === "unknown_tool" ? "工具不存在，本次评审不再重试该工具" : "调用未成功，保留证据缺口"}`
+          : `MCP 结果已加入证据账本：${name}`,
       )
     })
   }
@@ -810,7 +897,14 @@ export class DecisionEngine {
         try {
           await this.call(id, epoch, phase, seat.id, seat.modelKey, controller)
         } catch (error) {
-          await this.pauseForError(id, epoch, safeError(error))
+          if (!(await this.closeForBudget(id, epoch, phase, error))) {
+            await this.pauseForError(
+              id,
+              epoch,
+              safeError(error),
+              error instanceof DecisionError ? error.code : undefined,
+            )
+          }
         }
       }
     })
@@ -832,14 +926,7 @@ export class DecisionEngine {
         return
       }
       if (activeElapsed(run) >= run.config.limits.maxDurationMinutes * 60000) {
-        if (run.phase === "discuss" || run.phase === "interpret") {
-          await this.advance(id, epoch, draft => {
-            draft.phase = "revise"
-            event(draft, "discussion_closed", "已到时间上限；保留当前快照并转入修订与独立复核")
-          })
-          continue
-        }
-        await this.pauseForError(id, epoch, "已到时间上限，当前阶段缺少可供修订的完整材料；检查点已保存")
+        await this.pauseForError(id, epoch, "已到时间上限；检查点与阶段报告已保留，尚未完成复核", "TIME_LIMIT")
         return
       }
       if (run.phase === "independent") {
@@ -911,32 +998,75 @@ export class DecisionEngine {
           )
           draft.round = 1
           draft.phase = draft.finishRequested ? "revise" : "discuss"
+          this.reserveClosing(draft)
         })
       } else if (run.phase === "discuss") {
-        if (run.finishRequested || run.calls.length + run.config.seats.length + 3 > run.config.limits.maxCalls) {
+        let closing = run.finishRequested
+        if (!closing) {
+          try {
+            const pendingSeats = run.config.seats.filter(
+              seat =>
+                assignedIssues(run, seat.id).length > 0 &&
+                !run.calls.some(
+                  call =>
+                    isReviewCall(call) &&
+                    call.phase === "discuss" &&
+                    call.round === run.round &&
+                    call.seatId === seat.id &&
+                    call.status === "succeeded",
+                ),
+            )
+            const requests = [
+              ...pendingSeats.map(seat => ({ phase: "discuss" as const, seatId: seat.id, modelKey: seat.modelKey })),
+              { phase: "interpret" as const, seatId: "moderator", modelKey: run.config.moderatorKey },
+            ]
+            let tokens = 0
+            let cny: number | null = 0
+            for (const request of requests) {
+              const prompt = makePrompt(run, request.phase, request.seatId)
+              const estimate =
+                this.gateway.estimate?.(SYSTEM, prompt, run.config.limits.outputTokens) ??
+                estimateTokens(SYSTEM, prompt, run.config.limits.outputTokens)
+              tokens += estimate
+              const price = cost(getModel(this.models, request.modelKey), estimate, run.config.limits.outputTokens)
+              cny = price === null || cny === null ? null : cny + price
+            }
+            reserveCheck(run, tokens, cny, "discuss", requests.length)
+          } catch (error) {
+            if (!(error instanceof DecisionError)) throw error
+            closing = true
+          }
+        }
+        if (closing) {
           await this.advance(id, epoch, draft => {
             draft.phase = "revise"
             event(
               draft,
               "discussion_closed",
-              draft.finishRequested ? "按人工指令进入修订" : "剩余调用优先用于完整修订与独立复核",
+              draft.finishRequested ? "按已记录的收尾安排进入修订" : "剩余调用优先用于完整修订与独立复核",
             )
           })
           continue
         }
         await this.seats(id, epoch, "discuss", controller)
         await this.advance(id, epoch, draft => {
-          draft.phase = "interpret"
-          event(draft, "ballot_ready", `第 ${draft.round} 轮表决已聚合，等待主持解读`)
+          draft.phase = draft.finishRequested ? "revise" : "interpret"
+          if (!draft.finishRequested) event(draft, "ballot_ready", `第 ${draft.round} 轮表决已聚合，等待主持解读`)
         })
       } else if (run.phase === "interpret") {
-        await this.call(id, epoch, "interpret", "moderator", run.config.moderatorKey, controller)
+        try {
+          await this.call(id, epoch, "interpret", "moderator", run.config.moderatorKey, controller)
+        } catch (error) {
+          if (!(await this.closeForBudget(id, epoch, "interpret", error))) throw error
+        }
         await this.advance(id, epoch, draft => {
           const assessment = assessDeliberation(draft)
           const softClosed =
             assessment.coverageSatisfied &&
             assessment.unreviewedCriticalBlockerIds.length === 0 &&
-            (assessment.allNeedEvidence || assessment.stagnantRounds >= 3)
+            (assessment.allNeedEvidence ||
+              assessment.stagnantRounds >= 3 ||
+              (assessment.stableBallots && assessment.noNewInformation && assessment.noFurtherDiscussion))
           const closingCalls = draft.calls.length + draft.config.seats.length + 3 > draft.config.limits.maxCalls
           if (draft.finishRequested || softClosed || closingCalls || draft.round >= draft.config.limits.maxRounds) {
             draft.phase = "revise"
@@ -948,7 +1078,9 @@ export class DecisionEngine {
                 : closingCalls
                   ? "预留最后两次调用用于修订与复核"
                   : softClosed
-                    ? "问题覆盖充分且连续三轮票型、证据与问题均无变化，Host 强制收敛并转入修订；席位的继续讨论意愿仅作参考"
+                    ? assessment.stagnantRounds >= 3
+                      ? "问题覆盖充分且连续三轮无新增证据或改票，Host 强制收敛并转入修订；模型自报的新信息保留为待评估意见"
+                      : "问题覆盖充分，当前无新增证据或改票且本轮席位均建议停止；Host 转入修订并保留异议"
                     : draft.round >= draft.config.limits.maxRounds
                       ? "已达到讨论轮数上限，保留票型与异议并转入修订"
                       : "按人工指令进入修订",

@@ -49,51 +49,57 @@ function latestBallotsBySeat(run: Run, round: number) {
   return [...latest.values()]
 }
 
-function roundSignature(run: Run, round: number): string | undefined {
-  const entries = successfulRounds(run)
-    .filter(item => item.call.round === round)
-    .flatMap(item =>
-      item.result.responses.map(response => ({
-        issueId: response.issueId,
-        position: response.position,
-        evidenceStatus: response.evidenceStatus,
-        blocking: response.blocking,
-        evidenceIds: [...response.evidenceIds].sort(),
-      })),
+export function discussionDelta(run: Run, round: number) {
+  const prior = successfulRounds(run).filter(item => item.call.round < round)
+  const current = successfulRounds(run).filter(item => item.call.round === round)
+  const responses = current.flatMap(item => item.result.responses)
+  const complete = run.issues.every(issue => responses.some(response => response.issueId === issue.id))
+  const changedBallots: Array<{ issueId: string; seatId: string }> = []
+  const signature = (response: (typeof responses)[number]) =>
+    JSON.stringify([response.position, response.evidenceStatus, response.blocking, [...response.evidenceIds].sort()])
+  for (const { call, result } of current) {
+    for (const response of result.responses) {
+      const sameSeat = prior
+        .filter(item => item.call.seatId === call.seatId)
+        .flatMap(item => item.result.responses)
+        .findLast(item => item.issueId === response.issueId)
+      const others = prior.flatMap(item => item.result.responses).filter(item => item.issueId === response.issueId)
+      // A rotated assignment is not a changed vote. Compare a returning seat to its own ballot.
+      if (
+        sameSeat
+          ? signature(sameSeat) !== signature(response)
+          : !others.some(item => signature(item) === signature(response))
+      ) {
+        changedBallots.push({ issueId: response.issueId, seatId: call.seatId })
+      }
+    }
+  }
+  const priorEvidence = new Set(
+    run.mcpCalls.filter(call => call.round < round && call.status === "succeeded").map(call => call.evidenceId),
+  )
+  const newEvidenceIds = run.mcpCalls
+    .filter(
+      call =>
+        call.round === round && call.status === "succeeded" && call.evidenceId && !priorEvidence.has(call.evidenceId),
     )
-    .sort((a, b) => a.issueId.localeCompare(b.issueId))
-  return entries.length === run.issues.length ? JSON.stringify(entries) : undefined
+    .map(call => call.evidenceId!)
+  return {
+    complete,
+    changedBallots,
+    newEvidenceIds: [...new Set(newEvidenceIds)],
+    // This remains visible for audit, but cannot grant the model control of the loop.
+    reportedNewInformation: responses.filter(response => response.newInformation).length,
+  }
 }
 
 function roundHasNewInformation(run: Run, round: number): boolean {
-  const current = successfulRounds(run).filter(item => item.call.round === round)
-  if (roundSignature(run, round) === undefined) return true
-  if (run.mcpCalls.some(call => call.round === round && call.status === "succeeded" && call.evidenceId)) return true
-  const priorEvidence = new Set(
-    successfulRounds(run)
-      .filter(item => item.call.round < round)
-      .flatMap(item => item.result.responses.flatMap(response => response.evidenceIds)),
-  )
-  return current.some(
-    item =>
-      item.result.responses.some(response => response.newInformation) ||
-      item.result.responses.some(response => response.evidenceIds.some(id => !priorEvidence.has(id))),
-  )
+  const delta = discussionDelta(run, round)
+  return !delta.complete || delta.changedBallots.length > 0 || delta.newEvidenceIds.length > 0
 }
 
 function stagnantRoundCount(run: Run, round: number): number {
   let count = 0
-  for (let current = round; current > 1; current -= 1) {
-    const signature = roundSignature(run, current)
-    if (
-      signature === undefined ||
-      signature !== roundSignature(run, current - 1) ||
-      roundHasNewInformation(run, current)
-    ) {
-      break
-    }
-    count += 1
-  }
+  for (let current = round; current > 1 && !roundHasNewInformation(run, current); current -= 1) count += 1
   return count
 }
 
@@ -103,14 +109,6 @@ export function assessDeliberation(run: Run, round = run.round): DeliberationAss
   const latestBallots = latestBallotsBySeat(run, round)
   const availableModelFamilies = new Set(run.config.seats.map(seat => seat.modelFamily ?? seat.modelKey)).size
   const current = discussion.filter(item => item.call.round === round)
-  const previousEvidence = new Map<string, Set<string>>()
-  for (const item of discussion.filter(item => item.call.round < round)) {
-    for (const response of item.result.responses) {
-      const known = previousEvidence.get(response.issueId) ?? new Set<string>()
-      response.evidenceIds.forEach(id => known.add(id))
-      previousEvidence.set(response.issueId, known)
-    }
-  }
   const currentResponses = current.flatMap(item => item.result.responses)
   const issues = run.issues.map(issue => {
     const ballots = latestBallots.filter(ballot => ballot.response.issueId === issue.id)
@@ -149,19 +147,16 @@ export function assessDeliberation(run: Run, round = run.round): DeliberationAss
       return summary.blockingVotes > 0 && summary.reviewerCount < 2
     })
     .map(issue => issue.id)
-  const discoveredEvidence = currentResponses.some(response =>
-    response.evidenceIds.some(id => !previousEvidence.get(response.issueId)?.has(id)),
-  )
   return {
     round,
     coverageSatisfied,
     stableBallots:
-      round > 1 &&
-      roundSignature(run, round) !== undefined &&
-      roundSignature(run, round) === roundSignature(run, round - 1),
-    noNewInformation:
-      currentResponses.length > 0 && !discoveredEvidence && currentResponses.every(item => !item.newInformation),
-    noFurtherDiscussion: current.length > 0 && current.every(item => !item.result.continueDiscussion),
+      round > 1 && discussionDelta(run, round).complete && discussionDelta(run, round).changedBallots.length === 0,
+    noNewInformation: !roundHasNewInformation(run, round),
+    noFurtherDiscussion:
+      discussionDelta(run, round).complete &&
+      current.length > 0 &&
+      current.every(item => !item.result.continueDiscussion),
     stagnantRounds: stagnantRoundCount(run, round),
     allNeedEvidence:
       currentResponses.length > 0 && currentResponses.every(response => response.position === "needs_evidence"),

@@ -134,7 +134,7 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
       )}
       {!boot ? (
         <p>正在读取角色与预算配置…</p>
-      ) : !boot.gateway?.configured ? (
+      ) : !progressOnly && boot.mode !== "demo" && !boot.gateway?.configured ? (
         <Settings
           scope={scope}
           onSaved={() => {

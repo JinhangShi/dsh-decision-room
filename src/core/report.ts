@@ -1,7 +1,13 @@
 import { activeElapsed, spent } from "./budget.js"
 import { assessDeliberation } from "./deliberation.js"
 import type { Model } from "./models.js"
-import { ballotInterpretationSchema, configurationWarnings, isReviewCall, type Run } from "./schema.js"
+import {
+  ballotInterpretationSchema,
+  configurationWarnings,
+  isReviewCall,
+  readDebateResult,
+  type Run,
+} from "./schema.js"
 
 export function formatChinaTime(timestamp: number): string {
   return new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().replace("Z", "+08:00")
@@ -101,6 +107,34 @@ export function reportMarkdown(run: Run, models: Model[]): string {
       ballot
         ? `独立覆盖：席位 ${ballot.reviewerCount}/${ballot.requiredReviewers}，模型族 ${ballot.modelFamilyCount}/${ballot.requiredModelFamilies}；票型：维持 ${ballot.positions.maintain}、修改 ${ballot.positions.revise}、否决 ${ballot.positions.reject}、弃权 ${ballot.positions.abstain}、待补证 ${ballot.positions.needs_evidence}；阻断票 ${ballot.blockingVotes}`
         : "独立覆盖：尚无讨论票据",
+      "",
+    )
+  }
+  const latestResponses = new Map<
+    string,
+    { seatId: string; round: number; response: ReturnType<typeof readDebateResult>["responses"][number] }
+  >()
+  if (run.phase !== "independent") {
+    for (const call of run.calls.filter(
+      call => isReviewCall(call) && call.phase === "discuss" && call.status === "succeeded",
+    )) {
+      for (const response of readDebateResult(call.result).responses) {
+        latestResponses.set(`${call.seatId}:${response.issueId}`, { seatId: call.seatId, round: call.round, response })
+      }
+    }
+  }
+  if (latestResponses.size) lines.push("## 各席最新意见与异议（模型判断，不作为已核验事实）", "")
+  for (const { seatId, round, response } of latestResponses.values()) {
+    lines.push(
+      `### ${seatId} · ${response.issueId} · 第 ${round} 轮`,
+      "",
+      response.reasoning,
+      "",
+      `修改建议：${response.proposedChange}`,
+      "",
+      `改变意见的条件：${response.whatWouldChangeMind}`,
+      "",
+      `立场：${response.position}；证据状态：${response.evidenceStatus}；阻断：${response.blocking ? "是" : "否"}；引用：${response.evidenceIds.join("、") || "待补证"}`,
       "",
     )
   }
