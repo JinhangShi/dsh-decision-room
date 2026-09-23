@@ -513,7 +513,11 @@ export class DecisionEngine {
     const tokens =
       this.gateway.estimate?.(SYSTEM, prompt, snapshot.config.limits.outputTokens) ??
       estimateTokens(SYSTEM, prompt, snapshot.config.limits.outputTokens)
-    if (!this.gateway.managedContext && tokens > model.contextTokens) {
+    if (
+      !this.gateway.managedContext &&
+      (tokens > model.contextTokens ||
+        tokens - snapshot.config.limits.outputTokens > (model.maxInputTokens ?? Infinity))
+    ) {
       throw new DecisionError("CONTEXT", "材料和评审上下文超过所选模型的保守容量，请缩小范围后创建新版本")
     }
     const reservedCost = cost(model, tokens - snapshot.config.limits.outputTokens, snapshot.config.limits.outputTokens)

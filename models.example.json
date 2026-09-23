@@ -12,7 +12,8 @@
     "note": "2026-09-18 短文本已测通；以当前实际调用为准。",
     "inputCnyPerMillion": null,
     "outputCnyPerMillion": null,
-    "contextTokens": 64000,
+    "contextTokens": 1000000,
+    "maxInputTokens": 991808,
     "outputParameter": "max_tokens",
     "extraBody": {
       "enable_thinking": false

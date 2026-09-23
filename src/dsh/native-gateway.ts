@@ -385,9 +385,11 @@ export class NativeGateway implements ModelGateway {
     const context = state.request.context!
     const run = context.currentRun?.() ?? context.run
     const factor = calibratedInputEstimate(run, state.request.model.key, 10000) / 10000
-    const room =
-      Math.floor((state.request.model.contextTokens - output - 1024) / factor) -
-      nativeInputEstimate(system, messages, [])
+    const inputLimit = Math.min(
+      state.request.model.contextTokens - output,
+      state.request.model.maxInputTokens ?? Infinity,
+    )
+    const room = Math.floor((inputLimit - 1024) / factor) - nativeInputEstimate(system, messages, [])
     const budget = Math.max(0, Math.min(TOOL_TOKEN_LIMIT, room))
     const discovery = state.searches < 3 && schemaTokens([discoverySchema]) <= budget ? [discoverySchema] : []
     state.toolBudget = Math.max(0, budget - schemaTokens(discovery))
@@ -496,6 +498,7 @@ export class NativeGateway implements ModelGateway {
       inputEstimate,
     )
     estimate.inputTokens = input
+    estimate.maxInputTokens = request.model.maxInputTokens
     const dispatch: ContextDispatch = {
       purpose,
       inputTokens: input,
@@ -525,7 +528,7 @@ export class NativeGateway implements ModelGateway {
         }
         state.compactionInputs.push(input)
       }
-      if (input + output > request.model.contextTokens)
+      if (input + output > request.model.contextTokens || input > (request.model.maxInputTokens ?? Infinity))
         throw new DecisionError("CONTEXT", contextError(estimate, request.model.label))
       const signal = options.signal ? AbortSignal.any([request.signal, options.signal]) : request.signal
       signal.throwIfAborted()

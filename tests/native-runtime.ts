@@ -12,7 +12,7 @@ import type { ModelGateway } from "../src/core/gateway.js"
 import { until } from "./fixtures.js"
 
 /** Real Cordis waterfalls, AgentLoop, tool execution, session replay and LLM routing. Only the upstream is fake. */
-export async function nativeRuntime(http: ModelGateway, definitions: ToolDefinition[] = []) {
+export async function nativeRuntime(http: ModelGateway, definitions: ToolDefinition[] = [], models = DEFAULT_MODELS) {
   const ctx = new Context()
   ctx.plugin(SystemPrompt, {})
   ctx.plugin(SessionStore)
@@ -44,7 +44,7 @@ export async function nativeRuntime(http: ModelGateway, definitions: ToolDefinit
       },
     },
   } satisfies NativeServices
-  const gateway = new NativeGateway(services, DEFAULT_MODELS, http)
+  const gateway = new NativeGateway(services, models, http)
   return {
     ctx,
     gateway,

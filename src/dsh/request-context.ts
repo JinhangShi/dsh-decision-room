@@ -107,5 +107,6 @@ export function contextError(estimate: ContextEstimate, model: string): string {
       : estimate.historyTokens > estimate.materialTokens
         ? "历史回应过大"
         : "材料和任务上下文过大"
-  return `${model} 本地预检未通过（尚未发送）：${cause}。保守估算输入 ${estimate.inputTokens} + 输出预留 ${estimate.outputTokens}，配置容量 ${estimate.contextTokens}；材料 ${estimate.materialTokens}、历史 ${estimate.historyTokens}、工具结果 ${estimate.toolResultTokens}、工具定义 ${estimate.toolDefinitionTokens} Token。已按需加载 ${estimate.toolCount}/${estimate.availableTools} 个 MCP 工具；已有结果保留。`
+  const inputLimit = estimate.maxInputTokens === undefined ? "" : `，输入上限 ${estimate.maxInputTokens}`
+  return `${model} 本地预检未通过（尚未发送）：${cause}。保守估算输入 ${estimate.inputTokens} + 输出预留 ${estimate.outputTokens}，配置容量 ${estimate.contextTokens}${inputLimit}；材料 ${estimate.materialTokens}、历史 ${estimate.historyTokens}、工具结果 ${estimate.toolResultTokens}、工具定义 ${estimate.toolDefinitionTokens} Token。已按需加载 ${estimate.toolCount}/${estimate.availableTools} 个 MCP 工具；已有结果保留。`
 }

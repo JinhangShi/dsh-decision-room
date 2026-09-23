@@ -198,15 +198,23 @@ describe("真实 DSH 大工具目录回归", () => {
     }
   })
 
-  it("单份材料确实超限时不派发、不扣预留，保留诊断和失败记录", async () => {
+  it.each([
+    { contextTokens: 64000, maxInputTokens: undefined },
+    { contextTokens: 1000000, maxInputTokens: 64000 },
+  ])("材料超过总容量或单独输入上限时不派发、不扣预留：%j", async limits => {
     let sent = 0
-    const native = await nativeRuntime({
-      async generate() {
-        sent += 1
-        throw new Error("Unexpected dispatch")
+    const models = DEFAULT_MODELS.map(model => ({ ...model, ...limits }))
+    const native = await nativeRuntime(
+      {
+        async generate() {
+          sent += 1
+          throw new Error("Unexpected dispatch")
+        },
       },
-    })
-    const engine = new DecisionEngine(new RunStore(new MemoryPersistence()), DEFAULT_MODELS, native.gateway, "demo")
+      [],
+      models,
+    )
+    const engine = new DecisionEngine(new RunStore(new MemoryPersistence()), models, native.gateway, "demo")
     try {
       await engine.initialize()
       const value = input()
@@ -219,6 +227,11 @@ describe("真实 DSH 大工具目录回归", () => {
       expect(spent(run)).toMatchObject({ tokens: 0, calls: 0, uncertain: 0 })
       expect(run.calls.length).toBeGreaterThan(0)
       expect(run.calls.every(call => call.dispatchState === "not_sent")).toBe(true)
+      if (limits.maxInputTokens) {
+        expect(run.stopReason).toContain("输入上限 64000")
+        expect(run.calls[0]!.contextEstimate?.inputTokens).toBeLessThan(limits.contextTokens)
+        expect(run.calls[0]!.contextEstimate?.maxInputTokens).toBe(64000)
+      }
     } finally {
       await engine.dispose()
       await native.dispose()

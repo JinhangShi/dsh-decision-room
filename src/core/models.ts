@@ -17,6 +17,7 @@ export const modelSchema = z
     inputCnyPerMillion: z.number().nonnegative().nullable().default(null),
     outputCnyPerMillion: z.number().nonnegative().nullable().default(null),
     contextTokens: z.number().int().min(2048).max(2000000).default(64000),
+    maxInputTokens: z.number().int().min(1).max(2000000).optional(),
     outputParameter: z.enum(["max_tokens", "max_completion_tokens"]).default("max_tokens"),
     extraBody: z.record(z.string(), z.unknown()).default({}),
   })
@@ -34,7 +35,17 @@ export const modelSchema = z
   })
 export type Model = z.infer<typeof modelSchema>
 export const DEFAULT_MODELS: Model[] = [
-  { key: "qwen", label: "千问 3.8 Max", family: "Qwen", model: "qwen3.8-max", extraBody: { enable_thinking: false } },
+  {
+    key: "qwen",
+    label: "千问 3.8 Max",
+    family: "Qwen",
+    model: "qwen3.8-max",
+    // Official declared window; a configured gateway may impose a lower limit.
+    // https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max (2026-09-23)
+    contextTokens: 1000000,
+    maxInputTokens: 991808,
+    extraBody: { enable_thinking: false },
+  },
   { key: "glm", label: "智谱 GLM 5.1", family: "GLM", model: "glm-5.1", extraBody: { thinking: { type: "disabled" } } },
   { key: "kimi", label: "Kimi K2.6", family: "Kimi", model: "kimi-k2.6", extraBody: {} },
   {

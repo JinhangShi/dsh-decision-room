@@ -23,11 +23,10 @@ describe("决策室完整流程", () => {
       ["overnight", 480],
     ])
     expect(REVIEW_MODES.map(mode => mode.limits.tokenBudget)).toEqual([1000000, 3000000, 6000000, 15000000])
-    expect(REVIEW_MODES.find(mode => mode.id === "overnight")?.limits).toMatchObject({
-      maxRounds: 64,
-      maxCalls: 360,
-      callTimeoutSeconds: 300,
-    })
+    for (const mode of REVIEW_MODES) {
+      expect(mode.limits).toMatchObject({ maxRounds: 80, maxCalls: 400, maxMcpCalls: 100 })
+    }
+    expect(REVIEW_MODES.find(mode => mode.id === "overnight")?.limits.callTimeoutSeconds).toBe(300)
     expect(DEFAULT_MODELS.map(model => model.key)).toEqual(["qwen", "glm", "kimi", "deepseek"])
     expect(DEFAULT_MODELS.every(model => model.enabled)).toBe(true)
   })
