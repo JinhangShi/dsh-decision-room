@@ -7,22 +7,34 @@ import {
   type Message,
   type UserMessage,
   type StreamChunk,
+  type ToolSchema,
 } from "@deepseek-ai/dsh-llm"
+import type { ToolDefinition } from "@deepseek-ai/dsh-tools"
 import type { Agent, AgentHandle, AgentRegistry, PreStepDecision } from "@deepseek-ai/dsh-agent"
 import type { SessionId, SessionStore } from "@deepseek-ai/dsh-session"
 import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence"
 import type { TokenMeter } from "@deepseek-ai/dsh-token-meter"
 import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt"
 import { DecisionError, type Phase, type Run } from "../core/schema.js"
-import { GatewayError, type ModelGateway, type ModelRequest, type ModelResponse } from "../core/gateway.js"
+import {
+  GatewayError,
+  type ContextDispatch,
+  type ModelGateway,
+  type ModelRequest,
+  type ModelResponse,
+} from "../core/gateway.js"
 import type { Model } from "../core/models.js"
 import { mcpBlockedReason } from "../core/mcp-status.js"
+import { assignedIssues } from "../core/prompts.js"
+import { contextError, contextEstimate, nativeInputEstimate, requestMessages } from "./request-context.js"
+import { discoverySchema, FIND_TOOLS, schemaTokens, selectTools, TOOL_TOKEN_LIMIT } from "./tool-selection.js"
+export { nativeInputEstimate } from "./request-context.js"
 
 export type NativeServices = {
   agentPresets: { mount(ctx: Agent["ctx"], id?: string): Promise<unknown> }
   agents: AgentRegistry
   sessions: SessionStore
-  sessionPersistence: SessionPersistence
+  sessionPersistence: Pick<SessionPersistence, "list">
   tokenMeter: TokenMeter
   llm: LlmRuntime
 }
@@ -33,6 +45,11 @@ type Active = {
   error?: unknown
   dispatched: boolean
   compactionInputs: number[]
+  catalog: ToolSchema[]
+  exposedTools: Set<string>
+  query?: string
+  searches: number
+  toolBudget: number
 }
 const PROVIDER = "dsh-decision-room"
 const textContent = (message: Message) =>
@@ -50,23 +67,6 @@ export function reviewMessages(messages: UserMessage[]): UserMessage[] {
     message =>
       message.source.kind === "tool" ||
       (message.source.kind === "plugin" && message.source.plugin === "dsh-decision-room"),
-  )
-}
-
-/** A UTF-8 density bound complements DSH's fixed four-characters heuristic for Chinese text. */
-export function nativeInputEstimate(system: string, messages: Message[], tools: GenerateOptions["tools"]): number {
-  return (
-    512 +
-    Math.ceil(
-      Buffer.byteLength(
-        JSON.stringify({
-          system,
-          messages: messages.map(message => ({ role: message.role, content: message.content })),
-          tools: tools ?? [],
-        }),
-        "utf8",
-      ) / 2,
-    )
   )
 }
 
@@ -186,12 +186,13 @@ export class NativeGateway implements ModelGateway {
       if (this.services.agents.get(id)) {
         throw new DecisionError("SESSION_OWNER", "评审角色会话已被其他运行实例占用")
       }
-      const system = `${request.system}\n以下为本次评审不可被摘要或历史发言覆盖的任务边界：\n${JSON.stringify({ question: context.run.brief.question, objective: context.run.brief.objective, constraints: context.run.brief.constraints })}`
+      const system = this.reviewSystem(request)
+      const owner = this
       const setup: NonNullable<Parameters<AgentRegistry["create"]>[0]["setup"]> = async ctx => {
-        await this.services.agentPresets.mount(ctx, "standard")
         const scoped = ctx as typeof ctx & {
           systemPrompt: SystemPrompt
           tools: {
+            register(definition: ToolDefinition): unknown
             guard?(guard: (exec: { name: string }) => string | undefined): unknown
           }
           on(
@@ -215,17 +216,28 @@ export class NativeGateway implements ModelGateway {
           ): unknown
         }
         scoped.tools.guard?.(exec =>
-          exec.name.startsWith("mcp__") && this.active.get(id)?.request.context?.phase === "discuss"
+          (exec.name.startsWith("mcp__") || exec.name === FIND_TOOLS) &&
+          this.active.get(id)?.request.context?.phase === "discuss"
             ? undefined
             : "决策室只在首轮结果公开后的交叉讨论阶段允许调用 MCP 工具",
         )
         scoped.on("tools/pre-execute", async (exec, next) => {
-          if (!exec.name.startsWith("mcp__")) return { kind: "deny", reason: "仅允许 MCP 工具" }
           const active = this.active.get(id)
           if (!active?.request.context) return { kind: "deny", reason: "MCP 调用不属于活动评审任务" }
           if (active.request.context.phase !== "discuss") {
             return { kind: "deny", reason: "独立首评隔离期间不允许外部工具" }
           }
+          if (!active.exposedTools.has(exec.name)) return { kind: "deny", reason: "工具未在本次请求中授权展示" }
+          const current = active.request.context.currentRun?.()
+          if (
+            active.request.signal.aborted ||
+            current?.status === "paused" ||
+            current?.status === "cancelled" ||
+            current?.finishRequested
+          )
+            return { kind: "deny", reason: "任务已停止补证" }
+          if (exec.name === FIND_TOOLS) return next()
+          if (!exec.name.startsWith("mcp__")) return { kind: "deny", reason: "仅允许 MCP 与本地工具检索" }
           try {
             await active.request.context.authorizeTool(String(exec.callId), exec.name, exec.arguments)
           } catch (error) {
@@ -266,6 +278,30 @@ export class NativeGateway implements ModelGateway {
           }
           return next()
         })
+        if (context.phase === "discuss")
+          scoped.tools.register({
+            ...discoverySchema,
+            output: {
+              schema: { type: "object", additionalProperties: true },
+              render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
+            },
+            async execute(args, exec) {
+              exec.signal.throwIfAborted()
+              const active = owner.active.get(id)
+              if (!active || active.searches >= 3)
+                return { tools: [], note: "本次本地检索次数已用完，请基于已有材料完成评审并保留缺口。" }
+              const query = args && typeof args === "object" && "query" in args ? args.query : undefined
+              if (typeof query !== "string" || !query.trim() || query.length > 256)
+                throw new DecisionError("TOOL_QUERY", "工具检索词须为 1–256 字符")
+              active.searches += 1
+              active.query = query.trim()
+              const tools = selectTools(owner.availableTools(active), active.query, active.toolBudget)
+              return {
+                tools: tools.map(tool => ({ name: tool.name, description: tool.description.slice(0, 160) })),
+                note: "仅匹配本地工具目录；下一步加载这些工具的参数。未执行任何外部查询。无匹配或定义过大的工具不会加载。",
+              }
+            },
+          })
         scoped.systemPrompt.section({ name: "decision-room-review", order: -1000, complete: true, text: system })
         scoped.on("agent/pre-step", async (_payload, next) => {
           const decision = await next()
@@ -274,13 +310,23 @@ export class NativeGateway implements ModelGateway {
         scoped.on("system-prompt/assemble", async (_assembly, _context, next) => {
           const result = await next()
           result.contexts = []
-          const context = this.active.get(id)?.request.context
-          const run = context?.currentRun?.() ?? context?.run
-          result.tools = mcpToolsForPhase(result.tools, context?.phase).filter(
-            tool => !run || (run.mcpCalls.length < run.config.limits.maxMcpCalls && !mcpBlockedReason(run, tool.name)),
-          )
+          const active = this.active.get(id)
+          if (active) {
+            active.catalog = mcpToolsForPhase(result.tools, active.request.context?.phase)
+            const prompt = [
+              {
+                id: "estimate" as Message["id"],
+                role: "user" as const,
+                source: { kind: "plugin" as const, plugin: PROVIDER },
+                content: [{ type: "text" as const, text: request.prompt }],
+              },
+            ]
+            result.tools = this.selectedTools(active, system, prompt, request.maxOutputTokens)
+          } else result.tools = []
           return result
         })
+        // Register isolation before the preset so its pre-step additions are inside our filter.
+        await this.services.agentPresets.mount(ctx, "standard")
         scoped.on("agent/request", async ({ agent }, next) => {
           const config = await next()
           const active = this.active.get(agent.id)
@@ -322,6 +368,39 @@ export class NativeGateway implements ModelGateway {
       this.pending.delete(id)
     }
   }
+  private reviewSystem(request: ModelRequest): string {
+    const { question, objective, constraints } = request.context!.run.brief
+    return `${request.system}\n以下为本次评审不可被摘要或历史发言覆盖的任务边界：\n${JSON.stringify({ question, objective, constraints })}`
+  }
+  private availableTools(state: Active): ToolSchema[] {
+    const context = state.request.context!
+    const run = context.currentRun?.() ?? context.run
+    if (context.phase !== "discuss" || run.finishRequested || run.mcpCalls.length >= run.config.limits.maxMcpCalls)
+      return []
+    return state.catalog.filter(tool => !mcpBlockedReason(run, tool.name))
+  }
+  private selectedTools(state: Active, system: string, messages: Message[], output: number): ToolSchema[] {
+    const available = this.availableTools(state)
+    if (!available.length) return []
+    const context = state.request.context!
+    const run = context.currentRun?.() ?? context.run
+    const factor = calibratedInputEstimate(run, state.request.model.key, 10000) / 10000
+    const room =
+      Math.floor((state.request.model.contextTokens - output - 1024) / factor) -
+      nativeInputEstimate(system, messages, [])
+    const budget = Math.max(0, Math.min(TOOL_TOKEN_LIMIT, room))
+    const discovery = state.searches < 3 && schemaTokens([discoverySchema]) <= budget ? [discoverySchema] : []
+    state.toolBudget = Math.max(0, budget - schemaTokens(discovery))
+    const assigned = new Set(assignedIssues(run, context.seatId))
+    const seat = run.config.seats.find(seat => seat.id === context.seatId)
+    const query =
+      state.query ??
+      `${seat?.name ?? ""} ${run.issues
+        .filter(issue => assigned.has(issue.id))
+        .map(issue => `${issue.title} ${issue.rationale}`)
+        .join(" ")}`
+    return [...discovery, ...selectTools(available, query, state.toolBudget)]
+  }
   async generate(request: ModelRequest): Promise<ModelResponse> {
     if (!request.context) {
       throw new DecisionError("NATIVE_CONTEXT", "评审调用缺少 DSH 会话归属")
@@ -330,7 +409,15 @@ export class NativeGateway implements ModelGateway {
     if (agent.status !== "idle" || this.active.has(agent.id)) {
       throw new DecisionError("BUSY", "评审角色正在处理上一条消息")
     }
-    const state: Active = { request, dispatched: false, compactionInputs: [] }
+    const state: Active = {
+      request,
+      dispatched: false,
+      compactionInputs: [],
+      catalog: [],
+      exposedTools: new Set(),
+      searches: 0,
+      toolBudget: TOOL_TOKEN_LIMIT,
+    }
     this.active.set(agent.id, state)
     const abort = () => agent.cancel({ kind: "user" })
     request.signal.addEventListener("abort", abort, { once: true })
@@ -376,21 +463,61 @@ export class NativeGateway implements ModelGateway {
     }
     const purpose = options.purpose === "compaction" ? "compaction" : state.dispatched ? "tool_followup" : "review"
     const output = Math.min(options.maxTokens ?? request.maxOutputTokens, request.maxOutputTokens)
-    const heuristic =
-      this.estimate(options.system ?? "", "", 0) +
-      options.messages.reduce((total, message) => total + this.services.tokenMeter.estimateMessage(message), 0)
-    const inputEstimate = Math.max(
-      heuristic,
-      nativeInputEstimate(options.system ?? "", options.messages, options.tools),
+    // Rebuild the actual outgoing view after every DSH hook, including late catalog injection.
+    const system =
+      purpose === "compaction"
+        ? `${this.reviewSystem(request)}\n请压缩下列评审记录，保留约束、证据引用与未解决异议。只输出摘要。`
+        : this.reviewSystem(request)
+    const original =
+      purpose === "compaction"
+        ? (this.handles.get(options.sessionId!)?.agent.session.deriveMessages?.() ?? options.messages)
+        : options.messages
+    const messages = requestMessages(original, request.model.key)
+    if (!messages.some(message => message.source.kind === "plugin"))
+      messages.unshift({
+        id: "host-material" as Message["id"],
+        role: "user",
+        source: { kind: "plugin", plugin: PROVIDER },
+        content: [{ type: "text", text: request.prompt }],
+      })
+    const selected = purpose === "compaction" ? [] : this.selectedTools(state, system, messages, output)
+    const estimate = contextEstimate(
+      system,
+      messages,
+      selected,
+      output,
+      request.model.contextTokens,
+      state.catalog.length,
     )
+    const inputEstimate = estimate.inputTokens
     const input = calibratedInputEstimate(
       request.context!.currentRun?.() ?? request.context!.run,
       request.model.key,
       inputEstimate,
     )
+    estimate.inputTokens = input
+    const dispatch: ContextDispatch = {
+      purpose,
+      inputTokens: input,
+      inputEstimate,
+      outputTokens: output,
+      contextEstimate: estimate,
+      hash: createHash("sha256")
+        .update(
+          JSON.stringify({
+            system,
+            messages: messages.map(message => ({ role: message.role, content: message.content })),
+            tools: selected,
+            output,
+          }),
+        )
+        .digest("hex"),
+      sessionId: String(options.sessionId),
+    }
     let receiptId: string | undefined
     let response: ModelResponse | undefined
     try {
+      await request.context!.preflight?.(dispatch)
       if (purpose === "compaction") {
         const previous = state.compactionInputs.at(-1)
         if (state.compactionInputs.length >= 2 || (previous !== undefined && input >= previous * 0.9)) {
@@ -398,36 +525,27 @@ export class NativeGateway implements ModelGateway {
         }
         state.compactionInputs.push(input)
       }
-      if (input + output > request.model.contextTokens) {
-        throw new DecisionError(
-          "CONTEXT",
-          `${request.model.label} 经 DSH 处理后仍需约 ${input + output} Token，当前配置容量为 ${request.model.contextTokens}。请核对模型容量或拆分单份过大的材料；已有评审和角色会话已保留。`,
-        )
-      }
-      receiptId = await request.context!.authorize({
-        purpose,
-        inputTokens: input,
-        inputEstimate,
-        outputTokens: output,
-        hash: createHash("sha256").update(JSON.stringify(options.messages)).digest("hex"),
-        sessionId: String(options.sessionId),
-      })
+      if (input + output > request.model.contextTokens)
+        throw new DecisionError("CONTEXT", contextError(estimate, request.model.label))
+      const signal = options.signal ? AbortSignal.any([request.signal, options.signal]) : request.signal
+      signal.throwIfAborted()
+      receiptId = await request.context!.authorize(dispatch)
+      state.exposedTools = new Set(selected.map(tool => tool.name))
       if (purpose !== "compaction") {
         state.dispatched = true
       }
-      const signal = options.signal ? AbortSignal.any([request.signal, options.signal]) : request.signal
       response = await this.http.generate({
         ...request,
-        system: options.system ?? request.system,
+        system,
         maxOutputTokens: output,
-        messages: options.messages
+        messages: messages
           .filter(message => message.role !== "system")
           .map(message => ({
             role: message.role === "assistant" ? "assistant" : "user",
             content: textContent(message),
           })),
-        dshMessages: options.messages,
-        tools: options.tools,
+        dshMessages: messages,
+        tools: selected,
         headers: attributionHeaders(),
         signal,
       })

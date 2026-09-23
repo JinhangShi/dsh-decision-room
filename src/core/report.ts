@@ -15,6 +15,7 @@ export function formatChinaTime(timestamp: number): string {
 
 export function reportMarkdown(run: Run, models: Model[]): string {
   const usage = spent(run)
+  const notSent = run.calls.filter(call => call.dispatchState === "not_sent").length
   const complete = run.status === "completed" && run.revisionResult && run.verification
   const unresolved = run.issues.filter(issue => issue.status !== "addressed")
   const deliberation = assessDeliberation(run)
@@ -159,6 +160,7 @@ export function reportMarkdown(run: Run, models: Model[]): string {
     "",
     "## 覆盖与用量",
     "",
+    `- 发送前被拦截或取消：${notSent} 次；这些尝试保留记录，不计上游用量与调用额度。状态不明的旧记录仍按预留保守计入。`,
   )
   for (const seat of run.config.seats) {
     const model = models.find(item => item.key === seat.modelKey)

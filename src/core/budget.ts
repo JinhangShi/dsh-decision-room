@@ -17,7 +17,7 @@ export function spent(run: Run): { tokens: number; costCny: number | null; calls
     costCny: run.calls.some(call => call.accountedCost === null)
       ? null
       : run.calls.reduce((total, call) => total + (call.accountedCost ?? 0), 0),
-    calls: run.calls.length,
+    calls: run.calls.filter(call => call.dispatchState !== "not_sent").length,
     uncertain: run.calls.filter(call => call.accounting === "uncertain").length,
   }
 }
@@ -47,7 +47,7 @@ export function reserveCheck(run: Run, tokens: number, cny: number | null, phase
   if (activeElapsed(run) >= limits.maxDurationMinutes * 60000) {
     throw new DecisionError("TIME_LIMIT", "已到本轮讨论时间上限，任务已暂停并保留检查点")
   }
-  if (used.calls + calls > limits.maxCalls) {
+  if (used.calls + calls > limits.maxCalls || run.calls.length + calls > 400) {
     throw new DecisionError("CALL_LIMIT", "已达到模型调用次数上限")
   }
   if (used.tokens + tokens > limits.tokenBudget) {
@@ -84,9 +84,12 @@ export function budgetBlocked(run: Run): boolean {
 export function settle(call: Call, model: Model, usage?: Usage): void {
   call.endedAt = Date.now()
   if (!usage) {
+    if (call.usage) return
+    if (releaseUnsent(call)) return
     call.accounting = "uncertain"
     return
   }
+  call.dispatchState = "sending"
   call.usage = usage
   call.accounting = "reported"
   call.accountedTokens = usage.totalTokens
@@ -97,4 +100,14 @@ export function settle(call: Call, model: Model, usage?: Usage): void {
     known === null
       ? null
       : known + (extra * Math.max(model.inputCnyPerMillion ?? 0, model.outputCnyPerMillion ?? 0)) / 1000000
+}
+
+/** Only a durable pre-dispatch state proves no upstream request could have begun. */
+export function releaseUnsent(call: Call): boolean {
+  if (call.dispatchState !== "reserved" && call.dispatchState !== "not_sent") return false
+  call.dispatchState = "not_sent"
+  call.accounting = "not_sent"
+  call.accountedTokens = 0
+  call.accountedCost = 0
+  return true
 }

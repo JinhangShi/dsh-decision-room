@@ -1,13 +1,14 @@
 import type { Model } from "./models.js"
 import type { ContentBlock, Message, ToolSchema } from "@deepseek-ai/dsh-llm"
 import { acceptsReturnedModel } from "./model-identity.js"
-import { DecisionError, type Phase, type Run, type Usage } from "./schema.js"
+import { DecisionError, type ContextEstimate, type Phase, type Run, type Usage } from "./schema.js"
 
 export type WireMessage = { role: "user" | "assistant"; content: string }
 export type ContextDispatch = {
   purpose: "review" | "compaction" | "tool_followup"
   inputTokens: number
   inputEstimate?: number
+  contextEstimate?: ContextEstimate
   outputTokens: number
   hash: string
   sessionId: string
@@ -19,6 +20,7 @@ export type ReviewContext = {
   phase: Phase
   seatId: string
   authorize(dispatch: ContextDispatch): Promise<string>
+  preflight?(dispatch: ContextDispatch): Promise<void>
   receipt(id: string, response: ModelResponse | undefined, error?: string): Promise<void>
   authorizeTool(callId: string, name: string, args: unknown): Promise<void>
   toolDecision(

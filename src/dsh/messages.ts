@@ -40,6 +40,7 @@ export type DecisionProgress = {
   tokens: number
   tokenBudget: number
   maxCalls: number
+  modelCalls?: number
   maxRounds: number
   mcp?: { calls: number; limit: number; sources: number; failed: number }
   stopReason?: string
@@ -82,6 +83,7 @@ export type DecisionProgress = {
     status: string
     purpose?: string
     tokens: number
+    notSent?: boolean
     error?: string
   }>
 }
@@ -162,7 +164,7 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
     }
   })
   return {
-    projectionVersion: 2,
+    projectionVersion: 3,
     id: `${run.id}:progress`,
     runId: run.id,
     revision: run.revision,
@@ -174,6 +176,7 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
     tokens: spent(run).tokens,
     tokenBudget: run.config.limits.tokenBudget,
     maxCalls: run.config.limits.maxCalls,
+    modelCalls: spent(run).calls,
     maxRounds: run.config.limits.maxRounds,
     mcp: {
       calls: run.mcpCalls.length,
@@ -202,6 +205,7 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
       status: call.status,
       ...(call.purpose ? { purpose: call.purpose } : {}),
       tokens: call.accountedTokens,
+      notSent: call.dispatchState === "not_sent",
       ...(call.error ? { error: call.error } : {}),
     })),
   }

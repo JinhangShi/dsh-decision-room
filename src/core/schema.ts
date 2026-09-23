@@ -292,6 +292,21 @@ export const usageSchema = z.object({
   totalTokens: z.number().nonnegative(),
 })
 export type Usage = z.infer<typeof usageSchema>
+export const contextEstimateSchema = z.object({
+  systemTokens: z.number().nonnegative(),
+  materialTokens: z.number().nonnegative(),
+  historyTokens: z.number().nonnegative(),
+  toolResultTokens: z.number().nonnegative(),
+  toolDefinitionTokens: z.number().nonnegative(),
+  inputTokens: z.number().nonnegative(),
+  outputTokens: z.number().nonnegative(),
+  contextTokens: z.number().nonnegative(),
+  toolCount: z.number().int().nonnegative(),
+  availableTools: z.number().int().nonnegative(),
+  toolNames: z.array(z.string()).optional(),
+  messageIds: z.array(z.string()).optional(),
+})
+export type ContextEstimate = z.infer<typeof contextEstimateSchema>
 export const callSchema = z.object({
   id,
   purpose: z.enum(["review", "compaction", "tool_followup"]).optional(),
@@ -308,11 +323,13 @@ export const callSchema = z.object({
   endedAt: z.number().optional(),
   reservedTokens: z.number(),
   inputEstimate: z.number().nonnegative().optional(),
+  contextEstimate: contextEstimateSchema.optional(),
+  dispatchState: z.enum(["reserved", "sending", "not_sent"]).optional(),
   reservedCost: z.number().nullable(),
   accountedTokens: z.number(),
   accountedCost: z.number().nullable(),
   usage: usageSchema.optional(),
-  accounting: z.enum(["reserved", "reported", "uncertain"]),
+  accounting: z.enum(["reserved", "reported", "uncertain", "not_sent"]),
   returnedModel: z.string().optional(),
   error: z.string().optional(),
   result: z.unknown().optional(),

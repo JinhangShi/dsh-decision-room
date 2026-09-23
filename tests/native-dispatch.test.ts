@@ -7,6 +7,7 @@ import type { ModelGateway, ModelRequest } from "../src/core/gateway.js"
 import { DEFAULT_MODELS } from "../src/core/models.js"
 import { MemoryPersistence, RunStore } from "../src/core/store.js"
 import { NativeGateway, type NativeServices } from "../src/dsh/native-gateway.js"
+import { FIND_TOOLS } from "../src/dsh/tool-selection.js"
 import { complete } from "./fixtures.js"
 
 /** Exercise the native adapter boundary without a provider or a user's DSH profile. */
@@ -30,7 +31,7 @@ function harness(http: ModelGateway, compact = false) {
         const handlers = new Map<string, unknown>()
         let system = ""
         const ctx = {
-          tools: { guard: () => {} },
+          tools: { guard: () => {}, register: () => {} },
           systemPrompt: {
             section: (section: { text: string }) => {
               system = section.text
@@ -118,7 +119,7 @@ describe("原生请求边界", () => {
         expect(request.dshMessages).toHaveLength(1)
         expect(request.prompt).toContain("不得导出客户个人信息")
         const phase = request.context!.phase
-        expect(request.tools?.map(tool => tool.name)).toEqual(phase === "discuss" ? ["mcp__registry__lookup"] : [])
+        expect(request.tools?.map(tool => tool.name)).toEqual(phase === "discuss" ? [FIND_TOOLS] : [])
         return demo.generate(request)
       },
     })

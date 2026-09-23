@@ -1,5 +1,14 @@
 import { createHash, randomUUID } from "node:crypto"
-import { activeElapsed, closingHold, cost, estimateTokens, reserveCheck, settle, spent } from "./budget.js"
+import {
+  activeElapsed,
+  closingHold,
+  cost,
+  estimateTokens,
+  releaseUnsent,
+  reserveCheck,
+  settle,
+  spent,
+} from "./budget.js"
 import { mcpBlockedReason, mcpFailureKind } from "./mcp-status.js"
 import { GatewayError, type ModelGateway, type ModelResponse, type ContextDispatch } from "./gateway.js"
 import { getModel, type Model } from "./models.js"
@@ -161,7 +170,7 @@ export class DecisionEngine {
               : "宿主重启：已恢复检查点，待你继续。中断调用按预留额度保守计入，不自动重发"
           for (const call of run.calls.filter(item => item.status === "running")) {
             call.status = "interrupted"
-            call.accounting = "uncertain"
+            if (!releaseUnsent(call)) call.accounting = "uncertain"
             call.endedAt = Date.now()
           }
           cancelActiveMcpCalls(run, "宿主重启，无法确认原 MCP 调用是否继续；记录已保留且不会自动重发")
@@ -540,6 +549,7 @@ export class DecisionEngine {
         accountedTokens: tokens,
         accountedCost: reservedCost,
         accounting: "reserved",
+        dispatchState: this.gateway.managedContext ? "reserved" : "sending",
         promptHash: hash(SYSTEM + prompt),
       })
       event(run, "call_started", `${phase} · ${seatId} · ${model.label}`)
@@ -571,6 +581,18 @@ export class DecisionEngine {
             phase,
             seatId,
             authorize: dispatch => this.authorizeDispatch(id, epoch, callId, model, dispatch),
+            preflight: dispatch =>
+              this.store
+                .update(id, run => {
+                  const call = run.calls.find(item => item.id === callId)!
+                  if (run.status !== "running" || run.epoch !== epoch) throw new DecisionError("STALE", "任务已停止")
+                  if (call.dispatchState === "reserved") {
+                    call.contextEstimate = dispatch.contextEstimate
+                    call.contextSessionId = dispatch.sessionId
+                    call.promptHash = dispatch.hash
+                  }
+                })
+                .then(() => {}),
             receipt: (receiptId, value, error) =>
               this.contextReceipt(id, epoch, callId, receiptId, model, value, error),
             authorizeTool: (toolCallId, name, args) => this.authorizeTool(id, epoch, callId, toolCallId, name, args),
@@ -618,6 +640,8 @@ export class DecisionEngine {
         call.returnedModel = receipt?.returnedModel
         call.status = signal.aborted || run.epoch !== epoch ? "interrupted" : "failed"
         call.error = safeError(error)
+        if (call.dispatchState === "not_sent")
+          event(run, "reservation_released", `${phase} · ${seatId} 尚未发送，已释放预留；失败尝试留档`)
         cancelActiveMcpCalls(run, call.error, callId)
         event(run, "call_failed", `${phase} · ${seatId}：${call.error}`)
       })
@@ -686,6 +710,8 @@ export class DecisionEngine {
         Object.assign(primary, {
           reservedTokens: tokens,
           inputEstimate: dispatch.inputEstimate,
+          contextEstimate: dispatch.contextEstimate,
+          dispatchState: "sending",
           reservedCost: cny,
           accountedTokens: tokens,
           accountedCost: cny,
@@ -706,6 +732,8 @@ export class DecisionEngine {
           usage: undefined,
           reservedTokens: tokens,
           inputEstimate: dispatch.inputEstimate,
+          contextEstimate: dispatch.contextEstimate,
+          dispatchState: "sending",
           reservedCost: cny,
           accountedTokens: tokens,
           accountedCost: cny,
@@ -734,6 +762,11 @@ export class DecisionEngine {
     error?: string,
   ): Promise<void> {
     if (receiptId === primaryId) {
+      await this.store.update(id, run => {
+        const call = run.calls.find(item => item.id === primaryId)!
+        settle(call, model, response?.usage)
+        call.returnedModel = response?.returnedModel
+      })
       return
     }
     await this.store.update(id, run => {
@@ -1067,7 +1100,7 @@ export class DecisionEngine {
             (assessment.allNeedEvidence ||
               assessment.stagnantRounds >= 3 ||
               (assessment.stableBallots && assessment.noNewInformation && assessment.noFurtherDiscussion))
-          const closingCalls = draft.calls.length + draft.config.seats.length + 3 > draft.config.limits.maxCalls
+          const closingCalls = spent(draft).calls + draft.config.seats.length + 3 > draft.config.limits.maxCalls
           if (draft.finishRequested || softClosed || closingCalls || draft.round >= draft.config.limits.maxRounds) {
             draft.phase = "revise"
             event(

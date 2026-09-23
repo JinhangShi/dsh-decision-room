@@ -83,7 +83,7 @@ export class DecisionTranscript {
       .filter(event => event.type === "decision-room/progress")
       .filter(event => event.data.progress.runId === run.id)
       .at(-1)
-    if (!previous || previous.data.progress.revision < run.revision || previous.data.progress.projectionVersion !== 2) {
+    if (!previous || previous.data.progress.revision < run.revision || previous.data.progress.projectionVersion !== 3) {
       session.append("decision-room/progress", { initial: !previous, progress: decisionProgress(run, this.models) })
     }
     for (const message of decisionMessages(run, this.models)) {

@@ -82,6 +82,7 @@ export function DecisionProgressCard({
     cancelled: "已取消",
     failed: "需处理",
   }[value.status]
+  const modelCalls = value.modelCalls ?? value.calls.length
   const failedCalls = value.calls.filter(call => call.status === "failed" || call.status === "interrupted").length
   const interruptedCalls = value.calls.filter(call => call.status === "interrupted").length
   const currentSeatCall = (seatId: string) =>
@@ -121,7 +122,7 @@ export function DecisionProgressCard({
       </p>
       {compact ? (
         <p className="decision-seat-summary">
-          本轮 {submittedSeats}/{value.seats.length} 个席位已提交 · {value.calls.length} 次调用
+          本轮 {submittedSeats}/{value.seats.length} 个席位已提交 · {modelCalls} 次调用
           {failedCalls ? ` · ${failedCalls} 次需关注` : ""}
           {mcp.sources ? ` · ${mcp.sources} 条 MCP 材料` : ""}
         </p>
@@ -150,7 +151,7 @@ export function DecisionProgressCard({
       <p className="decision-caption">
         {compact
           ? "完整发言和报告保留在主聊天。"
-          : `调用 ${value.calls.length} / ${value.maxCalls} · MCP 调用 ${mcp.calls} / ${mcp.limit} · 已计入 / 预留 ${value.tokens.toLocaleString()} / ${value.tokenBudget.toLocaleString()} Token`}
+          : `调用 ${modelCalls} / ${value.maxCalls} · MCP 调用 ${mcp.calls} / ${mcp.limit} · 已计入 / 预留 ${value.tokens.toLocaleString()} / ${value.tokenBudget.toLocaleString()} Token`}
       </p>
       {compact && (
         <div className="decision-limit-summary" aria-label="任务执行上限">
@@ -158,7 +159,7 @@ export function DecisionProgressCard({
             讨论轮次 <strong>{value.round}</strong> / {value.maxRounds}
           </span>
           <span>
-            模型调用 <strong>{value.calls.length}</strong> / {value.maxCalls}
+            模型调用 <strong>{modelCalls}</strong> / {value.maxCalls}
           </span>
           <span>
             MCP 调用 <strong>{mcp.calls}</strong> / {mcp.limit}
@@ -326,7 +327,7 @@ export function DecisionProgressCard({
           <summary>
             <span>模型调用过程</span>
             <small>
-              {value.calls.length} 次调用{failedCalls ? ` · ${failedCalls} 次需关注` : ""}
+              {modelCalls} 次调用{failedCalls ? ` · ${failedCalls} 次需关注` : ""}
             </small>
           </summary>
           <ol className="decision-call-list">
@@ -349,7 +350,9 @@ export function DecisionProgressCard({
                   {call.error && <p>{call.error}</p>}
                 </div>
                 <div className="decision-call-result">
-                  <span className="decision-call-status">{callStatus[call.status]?.label ?? call.status}</span>
+                  <span className="decision-call-status">
+                    {call.notSent ? "未发送" : (callStatus[call.status]?.label ?? call.status)}
+                  </span>
                   <strong>{call.tokens.toLocaleString()}</strong>
                   <small>Token</small>
                 </div>
