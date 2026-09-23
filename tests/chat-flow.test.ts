@@ -24,6 +24,7 @@ describe("主聊天驱动决策", () => {
     expect(draft).toContain(value.brief.plan)
     expect(draft).toContain("evidence-a")
     expect(draft).toContain(String(value.config.limits.tokenBudget))
+    expect(draft).toContain(`${value.config.limits.maxMcpCalls} 次 MCP 调用`)
     expect(draft).toContain("decision_room_start")
     expect(() => fillDecisionDraft(composer, "另一份材料")).toThrow("没有覆盖")
     expect(draft).toBe(text)

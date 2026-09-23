@@ -1,11 +1,12 @@
 import type { Model } from "../core/models.js"
-import type { RunConfig, Scope } from "../core/schema.js"
+import type { ReviewCountLimits, RunConfig, Scope } from "../core/schema.js"
 
 export type Bootstrap = {
   token: string
   models: Model[]
   mode: "live" | "demo"
   defaults: RunConfig
+  reviewLimits?: ReviewCountLimits
   contextOwner?: "dsh" | "standalone"
   gateway?: { configured: boolean; baseUrl: string }
 }

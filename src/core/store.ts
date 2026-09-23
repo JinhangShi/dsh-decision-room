@@ -121,7 +121,12 @@ export class RunStore {
       return structuredClone(record)
     })
   }
-  async update(id: string, change: (run: Run) => void, expectedRevision?: number): Promise<Run> {
+  async update(
+    id: string,
+    change: (run: Run) => void,
+    expectedRevision?: number,
+    options: { preserveUpdatedAt?: boolean } = {},
+  ): Promise<Run> {
     return this.lock(id, async () => {
       const draft = this.get(id)
       if (expectedRevision !== undefined && draft.revision !== expectedRevision) {
@@ -129,7 +134,7 @@ export class RunStore {
       }
       change(draft)
       draft.revision += 1
-      draft.updatedAt = Date.now()
+      if (!options.preserveUpdatedAt) draft.updatedAt = Date.now()
       const valid = runSchema.parse(draft)
       await this.persistence.save(valid)
       this.records.set(id, valid)

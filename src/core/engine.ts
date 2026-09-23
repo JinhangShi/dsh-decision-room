@@ -29,6 +29,8 @@ import {
   type CreateInput,
   type Phase,
   type Run,
+  type RunConfig,
+  type ReviewCountLimits,
   type Scope,
 } from "./schema.js"
 import { RunStore } from "./store.js"
@@ -112,7 +114,11 @@ export class DecisionEngine {
     readonly models: Model[],
     private gateway: ModelGateway,
     readonly mode: "live" | "demo" = "live",
+    readonly reviewLimits?: ReviewCountLimits,
   ) {}
+  effectiveLimits(limits: RunConfig["limits"]): RunConfig["limits"] {
+    return { ...limits, ...this.reviewLimits }
+  }
   get contextOwner(): "dsh" | "standalone" {
     return this.gateway.managedContext ? "dsh" : "standalone"
   }
@@ -157,6 +163,27 @@ export class DecisionEngine {
 
   async initialize(): Promise<void> {
     await this.store.initialize()
+    if (this.reviewLimits) {
+      for (const record of this.store.list()) {
+        const limits = this.effectiveLimits(record.config.limits)
+        if (JSON.stringify(limits) === JSON.stringify(record.config.limits)) continue
+        await this.store.update(
+          record.id,
+          run => {
+            event(
+              run,
+              "profile_limits_applied",
+              `按用户配置统一 Profile 次数上限；原限制 ${JSON.stringify(run.config.limits)} → ${JSON.stringify(limits)}；原始调用、报告和评审结论保留`,
+            )
+            run.config.limits = limits
+            if (["draft", "paused", "running"].includes(run.status)) this.reserveClosing(run)
+            if (run.stopCode === "CALL_LIMIT") delete run.stopCode
+          },
+          undefined,
+          { preserveUpdatedAt: true },
+        )
+      }
+    }
     const unattended = new Set<string>()
     for (const record of this.store.list()) {
       if (record.status === "running" || record.calls.some(call => call.status === "running")) {
@@ -209,6 +236,7 @@ export class DecisionEngine {
     }
     const config = {
       ...input.config,
+      limits: this.effectiveLimits(input.config.limits),
       seats: input.config.seats.map(seat => ({
         ...seat,
         modelFamily: getModel(this.models, seat.modelKey).family,
@@ -256,6 +284,13 @@ export class DecisionEngine {
       mode: this.mode,
     }
     this.reserveClosing(run)
+    if (JSON.stringify(config.limits) !== JSON.stringify(input.config.limits)) {
+      event(
+        run,
+        "profile_limits_applied",
+        `Host 按用户配置统一次数上限：请求 ${JSON.stringify(input.config.limits)} → ${JSON.stringify(config.limits)}`,
+      )
+    }
     event(
       run,
       "created",
@@ -342,7 +377,8 @@ export class DecisionEngine {
     return next
   }
   async changeLimits(id: string, scope: Scope, revision: number, value: unknown): Promise<Run> {
-    const limits = limitsSchema.parse(value)
+    const requested = limitsSchema.parse(value)
+    const limits = this.effectiveLimits(requested)
     return this.store.update(
       id,
       run => {
@@ -362,6 +398,13 @@ export class DecisionEngine {
           }
         }
         event(run, "limits_changed", `用户调整限制：${JSON.stringify(run.config.limits)} → ${JSON.stringify(limits)}`)
+        if (JSON.stringify(requested) !== JSON.stringify(limits)) {
+          event(
+            run,
+            "profile_limits_applied",
+            `次数上限受用户设置的 Profile 配置约束；请求 ${JSON.stringify(requested)} → ${JSON.stringify(limits)}`,
+          )
+        }
         run.config.limits = limits
         this.reserveClosing(run)
         delete run.stopCode

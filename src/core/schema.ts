@@ -64,6 +64,14 @@ export const runConfigSchema = z
       ctx.addIssue({ code: "custom", message: "评审席位 ID 不得重复" })
     }
   })
+export const reviewCountLimitsSchema = z
+  .object({
+    maxRounds: z.number().int().min(1).max(80),
+    maxCalls: z.number().int().min(8).max(400),
+    maxMcpCalls: z.number().int().min(0).max(100),
+  })
+  .strict()
+export type ReviewCountLimits = z.infer<typeof reviewCountLimitsSchema>
 export const createSchema = z
   .object({
     scope: scopeSchema,

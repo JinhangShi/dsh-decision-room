@@ -11,7 +11,7 @@
 从 npm 安装到 DSH Web Profile：
 
 ```sh
-dsh plugin --profile web add dsh-decision-room@0.9.9
+dsh plugin --profile web add dsh-decision-room@0.9.10
 ```
 
 本地开发包也可以按下文的“打包与 DSH 安装”方式安装。
@@ -100,7 +100,7 @@ pnpm pack --pack-destination dist
 完整停止你准备安装的 DSH Profile，然后执行：
 
 ```sh
-dsh plugin --profile web add ./dist/dsh-decision-room-0.9.9.tgz
+dsh plugin --profile web add ./dist/dsh-decision-room-0.9.10.tgz
 ```
 
 启动 DSH 的进程需要同一份 Host 环境配置，插件不会读取浏览器存储中的密钥：
@@ -155,6 +155,20 @@ pnpm typecheck    # 交付前最后一步
 `pnpm smoke:live` 是**会产生 API 调用**的显式验收命令：使用不含业务数据的合成方案，最多 16 次调用、1 轮讨论、15 分钟、60 万 Token 预留额度。结果保存在 `.decision-room/live-smoke-result.json`，不会提交到仓库。
 
 ## 存储、安全与适用范围
+
+如需让当前 Profile 的所有任务统一采用次数额度，在 `~/.dsh/profiles/web/cordis.patch.yml` 中为插件配置（合并到现有补丁列表）：
+
+```yaml
+- id: dsh-decision-room
+  name: dsh-decision-room
+  config:
+    reviewLimits:
+      maxRounds: 80
+      maxCalls: 400
+      maxMcpCalls: 100
+```
+
+这是用户明确启用的全局配置。Host 在新建、续议、单任务额度调整以及启动加载旧任务时执行统一值，旧聊天提示词和缓存草稿无法覆盖。已有任务会追加包含原始额度的审计事件，保留调用、材料、评审结论与报告；时间、Token 和金额预算仍按任务执行。没有启用此配置时，调用方明确提交的次数额度继续有效。
 
 - DSH 中由 `decision_room_v1` Storage Domain 保存任务、预算和问题账本；角色历史和主聊天消息使用 DSH 原生 Session 持久化。开发预览使用 `.decision-room/{demo,live}/runs.json`。
 - 升级会把旧任务已公开的评审同步到原会话主聊天，并保留成功检查点；重启不会自行继续付费任务。

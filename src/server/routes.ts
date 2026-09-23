@@ -5,12 +5,7 @@ import { DecisionEngine, publicRun } from "../core/engine.js"
 import { defaultConfiguration, publicModels } from "../core/models.js"
 import { reportHtml, reportMarkdown } from "../core/report.js"
 import { assertScope, createSchema, DecisionError, scopeSchema } from "../core/schema.js"
-import {
-  applyGatewaySettings,
-  clearGatewaySettings,
-  gatewaySettingsSchema,
-  gatewaySettingsView,
-} from "./config.js"
+import { applyGatewaySettings, clearGatewaySettings, gatewaySettingsSchema, gatewaySettingsView } from "./config.js"
 
 export type RequestLike = AsyncIterable<Uint8Array> & {
   method?: string
@@ -110,12 +105,15 @@ export function createRoutes(
       const url = new URL(req.url ?? "/", "http://localhost")
       const path = url.pathname.replace(/^\/decision-room/, "")
       if (req.method === "GET" && path === "/api/bootstrap") {
+        const defaults = defaultConfiguration(engine.models)
+        defaults.limits = engine.effectiveLimits(defaults.limits)
         return send(res, 200, {
           token,
           models: publicModels(engine.models),
           mode: engine.mode,
           contextOwner: engine.contextOwner,
-          defaults: defaultConfiguration(engine.models),
+          defaults,
+          reviewLimits: engine.reviewLimits,
           gateway: gatewaySettingsView(gateway.env),
         })
       }

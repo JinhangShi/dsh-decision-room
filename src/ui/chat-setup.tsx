@@ -97,6 +97,7 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
       if (!boot) {
         return
       }
+      config = { ...config, limits: { ...config.limits, ...boot.reviewLimits } }
       try {
         sessionStorage.setItem(key, JSON.stringify({ brief, config }))
       } catch {
@@ -161,7 +162,10 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
           <BriefForm
             models={boot.models}
             initialBrief={saved?.brief ?? EMPTY_BRIEF}
-            initialConfig={saved?.config ?? boot.defaults}
+            initialConfig={{
+              ...(saved?.config ?? boot.defaults),
+              limits: { ...(saved?.config ?? boot.defaults).limits, ...boot.reviewLimits },
+            }}
             parent={null}
             composeOnly
             onDraftChange={updateDraft}
