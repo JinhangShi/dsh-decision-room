@@ -5,6 +5,7 @@ import { spent } from "../core/budget.js"
 import { assessDeliberation } from "../core/deliberation.js"
 import {
   ballotInterpretationSchema,
+  isReviewCall,
   readOrganizeResult,
   readDebateResult,
   reviewSchema,
@@ -130,7 +131,7 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
   const completedRounds = [
     ...new Set(
       run.calls
-        .filter(call => call.purpose !== "compaction" && call.phase === "discuss" && call.status === "succeeded")
+        .filter(call => isReviewCall(call) && call.phase === "discuss" && call.status === "succeeded")
         .map(call => call.round),
     ),
   ]
@@ -139,10 +140,7 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
         const responses = run.calls
           .filter(
             call =>
-              call.purpose !== "compaction" &&
-              call.phase === "discuss" &&
-              call.round === round &&
-              call.status === "succeeded",
+              isReviewCall(call) && call.phase === "discuss" && call.round === round && call.status === "succeeded",
           )
           .flatMap(call => readDebateResult(call.result).responses)
         return responses.some(response => response.issueId === issue.id)
@@ -151,11 +149,7 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
     .sort((a, b) => a - b)
   const ballotHistory = completedRounds.map(round => {
     const interpretationCall = run.calls.find(
-      call =>
-        call.purpose !== "compaction" &&
-        call.phase === "interpret" &&
-        call.round === round &&
-        call.status === "succeeded",
+      call => isReviewCall(call) && call.phase === "interpret" && call.round === round && call.status === "succeeded",
     )
     return {
       round,
@@ -238,21 +232,13 @@ export function decisionMessages(run: Run, models: Model[]): DecisionMessage[] {
   ]
   const ballotMessage = (round: number): DecisionMessage | undefined => {
     const calls = run.calls.filter(
-      call =>
-        call.purpose !== "compaction" &&
-        call.phase === "discuss" &&
-        call.round === round &&
-        call.status === "succeeded",
+      call => isReviewCall(call) && call.phase === "discuss" && call.round === round && call.status === "succeeded",
     )
     const responded = new Set(calls.flatMap(call => readDebateResult(call.result).responses.map(item => item.issueId)))
     if (!run.issues.length || run.issues.some(issue => !responded.has(issue.id))) return undefined
     const assessment = assessDeliberation(run, round)
     const interpretationCall = run.calls.find(
-      call =>
-        call.purpose !== "compaction" &&
-        call.phase === "interpret" &&
-        call.round === round &&
-        call.status === "succeeded",
+      call => isReviewCall(call) && call.phase === "interpret" && call.round === round && call.status === "succeeded",
     )
     const interpretation = interpretationCall ? ballotInterpretationSchema.parse(interpretationCall.result) : undefined
     const submittedSeats = new Set(calls.map(call => call.seatId)).size
@@ -282,9 +268,7 @@ ${rows.join("\n")}
     )
   }
   if (run.phase !== "independent") {
-    for (const call of run.calls.filter(
-      call => call.purpose !== "compaction" && call.status === "succeeded" && call.result,
-    )) {
+    for (const call of run.calls.filter(call => isReviewCall(call) && call.status === "succeeded" && call.result)) {
       let text = ""
       if (call.phase === "independent") {
         const value = reviewSchema.parse(call.result)
@@ -322,7 +306,7 @@ ${rows.join("\n")}
     const rounds = [
       ...new Set(
         run.calls
-          .filter(call => call.purpose !== "compaction" && call.phase === "discuss" && call.status === "succeeded")
+          .filter(call => isReviewCall(call) && call.phase === "discuss" && call.status === "succeeded")
           .map(call => call.round),
       ),
     ].sort((a, b) => a - b)

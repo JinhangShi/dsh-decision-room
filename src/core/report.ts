@@ -1,7 +1,7 @@
 import { activeElapsed, spent } from "./budget.js"
 import { assessDeliberation } from "./deliberation.js"
 import type { Model } from "./models.js"
-import { ballotInterpretationSchema, configurationWarnings, type Run } from "./schema.js"
+import { ballotInterpretationSchema, configurationWarnings, isReviewCall, type Run } from "./schema.js"
 
 export function formatChinaTime(timestamp: number): string {
   return new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().replace("Z", "+08:00")
@@ -47,7 +47,7 @@ export function reportMarkdown(run: Run, models: Model[]): string {
     "",
   ]
   const interpretations = run.calls
-    .filter(call => call.purpose !== "compaction" && call.phase === "interpret" && call.status === "succeeded")
+    .filter(call => isReviewCall(call) && call.phase === "interpret" && call.status === "succeeded")
     .sort((a, b) => a.round - b.round)
   if (interpretations.length) {
     lines.push("## 逐轮表决解读", "")

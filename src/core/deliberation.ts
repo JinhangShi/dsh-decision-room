@@ -1,4 +1,4 @@
-import { readDebateResult, type Run } from "./schema.js"
+import { isReviewCall, readDebateResult, type Run } from "./schema.js"
 
 const POSITIONS = ["maintain", "revise", "reject", "abstain", "needs_evidence"] as const
 const EVIDENCE = ["supported", "conflicting", "missing"] as const
@@ -32,7 +32,7 @@ function counts<const T extends readonly string[]>(values: T): Record<T[number],
 
 function successfulRounds(run: Run) {
   return run.calls
-    .filter(call => call.purpose !== "compaction" && call.phase === "discuss" && call.status === "succeeded")
+    .filter(call => isReviewCall(call) && call.phase === "discuss" && call.status === "succeeded")
     .map(call => ({ call, result: readDebateResult(call.result) }))
 }
 

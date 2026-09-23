@@ -18,6 +18,7 @@ import { DecisionTranscript } from "./dsh/transcript.js"
 import { DecisionChatActions, startReviewSchema, continueReviewSchema } from "./dsh/chat-actions.js"
 import { DemoGateway } from "./core/demo-gateway.js"
 import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt"
+import { KNOWN_SESSION_EVENT_TYPES } from "@deepseek-ai/dsh-session"
 
 export const inject = [
   "webServer",
@@ -32,6 +33,16 @@ export const inject = [
   "agentPresets",
   "systemPrompt",
 ] as const
+const DECISION_SESSION_EVENT_TYPES = ["decision-room/message", "decision-room/progress"] as const
+
+/** DSH rc.2 exposes its event catalog as readonly but has not added a downstream registration API yet. */
+export function registerDecisionSessionEvents(catalog: ReadonlySet<string>): void {
+  const mutable = catalog as Set<string>
+  if (typeof mutable.add !== "function") {
+    throw new Error("当前 DSH 不支持注册决策室会话事件，请升级 DSH")
+  }
+  for (const type of DECISION_SESSION_EVENT_TYPES) mutable.add(type)
+}
 type Execution = {
   agent?: {
     session: {
@@ -87,6 +98,7 @@ function executionScope(execution: Execution): Scope {
   return { sessionId: session.id, workspaceId: session.header.cwd }
 }
 export function apply(ctx: HostContext): void {
+  registerDecisionSessionEvents(KNOWN_SESSION_EVENT_TYPES)
   const ready = (async () => {
     const configuration = await loadConfiguration()
     const gatewaySettings = await createGatewaySettingsStore(configuration.env)

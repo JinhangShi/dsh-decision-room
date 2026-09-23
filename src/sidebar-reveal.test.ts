@@ -46,9 +46,9 @@ describe("DSH collapsed sidebar compatibility", () => {
     ).toMatchObject({ workspaceId: "review", path: "/workspace" })
   })
 
-  it("重新打开入口时优先复用同工作空间已有的运行中决策会话", () => {
+  it("重新打开入口时只复用当前正在查看的决策会话", () => {
     const snapshot = {
-      current: "main",
+      current: "session-dsh-decision-room-running",
       ids: ["session-dsh-decision-room-old", "session-dsh-decision-room-running", "main"],
       byId: {
         "session-dsh-decision-room-old": { blank: false, cwd: "/workspace" },
@@ -56,20 +56,20 @@ describe("DSH collapsed sidebar compatibility", () => {
         main: { blank: false, cwd: "/workspace" },
       },
     }
-    expect(selectDecisionSession(snapshot, "/workspace", [], id => id.endsWith("running"))).toBe(
-      "session-dsh-decision-room-running",
-    )
+    expect(selectDecisionSession(snapshot, "/workspace", [])).toBe("session-dsh-decision-room-running")
   })
 
-  it("没有运行中任务时也复用已有决策会话，不因非 blank 而新建", () => {
+  it("从普通新对话进入时不跳回同工作空间的旧决策会话", () => {
     const snapshot = {
+      current: "main",
       ids: ["session-dsh-decision-room-used", "session-dsh-decision-room-empty"],
       byId: {
         "session-dsh-decision-room-used": { blank: false, cwd: "/workspace" },
         "session-dsh-decision-room-empty": { blank: true, cwd: "/workspace" },
+        main: { blank: true, cwd: "/workspace" },
       },
     }
-    expect(selectDecisionSession(snapshot, "/workspace", [], () => false)).toBe("session-dsh-decision-room-used")
+    expect(selectDecisionSession(snapshot, "/workspace", [])).toBeUndefined()
   })
 
   it("queues a reveal until the target session mounts without opening another session", () => {

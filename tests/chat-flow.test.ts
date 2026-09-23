@@ -143,6 +143,21 @@ describe("主聊天驱动决策", () => {
     expect(compactHtml).toContain("第 2 轮")
     expect(compactHtml).toContain("当前不宜直接扩大投入")
   })
+  it("MCP 工具跟进成功但没有独立结构化结果时不会让进度侧栏白屏", async () => {
+    const { engine } = await setup()
+    const run = await complete(engine)
+    const primary = run.calls.find(call => call.phase === "discuss" && call.status === "succeeded")!
+    run.calls.push({
+      ...primary,
+      id: "tool-followup-without-result",
+      key: "tool-followup-without-result",
+      purpose: "tool_followup",
+      result: undefined,
+    })
+    expect(() => decisionProgress(run, engine.models)).not.toThrow()
+    expect(() => decisionMessages(run, engine.models)).not.toThrow()
+    expect(decisionProgress(run, engine.models).ballotHistory).toHaveLength(run.round)
+  })
   it("每轮讨论完成后在主聊天追加不可变的 Host 表决快照", async () => {
     const { engine } = await setup()
     const run = await complete(engine)

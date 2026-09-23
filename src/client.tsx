@@ -78,25 +78,21 @@ export function selectDecisionSession(
   snapshot: SessionListSnapshot,
   workspacePath: string,
   archived: string[],
-  running: (sessionId: string) => boolean,
 ): string | undefined {
-  const candidates = [...new Set([snapshot.current, ...(snapshot.ids ?? [])])].filter(
-    (id): id is string =>
-      typeof id === "string" &&
-      id.startsWith(PREFIX) &&
-      snapshot.byId?.[id]?.cwd === workspacePath &&
-      !archived.includes(id),
-  )
-  return (
-    candidates.find(id => running(id)) ??
-    candidates.find(id => snapshot.byId?.[id]?.blank !== true) ??
-    candidates.find(id => snapshot.byId?.[id]?.blank === true)
-  )
+  const current = snapshot.current
+  return typeof current === "string" &&
+    current.startsWith(PREFIX) &&
+    snapshot.byId?.[current]?.cwd === workspacePath &&
+    !archived.includes(current)
+    ? current
+    : undefined
 }
-function workspaceFor(ctx: ClientContext, sessionId?: string): Workspace {
+function workspaceFor(ctx: ClientContext, sessionId?: string, preferredPath?: string): Workspace {
   const snapshot = ctx.workspaces.list.getSnapshot()
   const sessionCwd = sessionId ? ctx.sessions.list.getSnapshot().byId?.[sessionId]?.cwd : undefined
-  const workspace = selectWorkspace(snapshot.items ?? [], snapshot.recentWorkspaceId, sessionId, sessionCwd)
+  const workspace =
+    selectWorkspace(snapshot.items ?? [], snapshot.recentWorkspaceId, sessionId, preferredPath ?? sessionCwd) ??
+    (preferredPath ? { workspaceId: preferredPath, path: preferredPath } : undefined)
   if (!workspace?.path) {
     throw new Error("请先选择有本地路径的工作空间，再进入决策室")
   }
@@ -205,10 +201,12 @@ function Launcher({ launch, wide = true }: { launch?: () => Promise<void>; wide?
 
 function DecisionSidebar({
   sessionId,
+  workspacePath,
   context,
   visible,
 }: {
   sessionId: string
+  workspacePath?: string
   context: ClientContext
   visible: boolean
 }): JSX.Element {
@@ -221,7 +219,7 @@ function DecisionSidebar({
       return state?.blank === true && !state.running
     },
   )
-  const workspace = workspaceFor(context, sessionId)
+  const workspace = workspaceFor(context, sessionId, workspacePath)
   const key = `decision-room:generated:${JSON.stringify([workspace.path, sessionId])}`
   const generated = useRef("")
   useEffect(() => {
@@ -408,7 +406,14 @@ export function apply(ctx: ClientContext): void {
             () => reveal.attach(sessionId, { store: props.store, tabId: props.tab.id }),
             [sessionId, props.store, props.tab.id],
           )
-          return <DecisionSidebar sessionId={sessionId} context={ctx} visible={props.visible} />
+          return (
+            <DecisionSidebar
+              sessionId={sessionId}
+              workspacePath={props.scope.cwd}
+              context={ctx}
+              visible={props.visible}
+            />
+          )
         },
       })
       sidebar = service
@@ -430,12 +435,7 @@ export function apply(ctx: ClientContext): void {
     const workspace = workspaceFor(ctx, before)
     const list = ctx.sessions.list.getSnapshot()
     const archived = ctx.workspaces.list.getSnapshot().archivedSessionIds ?? []
-    const reusable = selectDecisionSession(
-      list,
-      workspace.path ?? "",
-      archived,
-      id => ctx.sessions.binding(id)?.session.getSnapshot().running === true,
-    )
+    const reusable = selectDecisionSession(list, workspace.path ?? "", archived)
     const target =
       reusable ??
       (await ctx.sessions.create({ workspaceId: workspace.workspaceId, sessionId: `${PREFIX}${crypto.randomUUID()}` }))

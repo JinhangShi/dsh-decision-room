@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { apply, inject, type HostContext } from "../src/index.js"
+import { apply, inject, registerDecisionSessionEvents, type HostContext } from "../src/index.js"
 import type { RequestLike } from "../src/server/routes.js"
 import { input } from "./fixtures.js"
 
@@ -8,6 +8,12 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 describe("DSH Host 接入契约", () => {
+  it("注册决策室持久化事件，使已有会话可被当前 Harness 恢复", () => {
+    const catalog = new Set<string>(["user/message"])
+    registerDecisionSessionEvents(catalog)
+    expect(catalog).toEqual(new Set(["user/message", "decision-room/message", "decision-room/progress"]))
+  })
+
   it("注册 Bundle Skill、工具和路由；原生草稿继承调用者范围且不启动模型", async () => {
     vi.stubEnv("DSH_DECISION_ENV_FILE", "")
     vi.stubEnv("DSH_DECISION_MODELS_FILE", "")

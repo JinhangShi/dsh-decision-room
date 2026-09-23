@@ -3,6 +3,7 @@ import {
   ballotInterpretationSchema,
   debateSchema,
   DecisionError,
+  isReviewCall,
   organizeSchema,
   reviewSchema,
   revisionSchema,
@@ -51,7 +52,7 @@ export function assignedIssues(run: Run, seatId: string): string[] {
         run.calls
           .filter(
             call =>
-              call.purpose !== "compaction" &&
+              isReviewCall(call) &&
               call.phase === "discuss" &&
               call.round < run.round &&
               call.status === "succeeded" &&
@@ -71,10 +72,7 @@ export function assignedIssues(run: Run, seatId: string): string[] {
 }
 export function makePrompt(run: Run, phase: Phase, seatId: string): string {
   const previous = run.calls
-    .filter(
-      call =>
-        call.phase === phase && call.round === run.round && call.seatId === seatId && call.purpose !== "compaction",
-    )
+    .filter(call => call.phase === phase && call.round === run.round && call.seatId === seatId && isReviewCall(call))
     .at(-1)
   const validationFailure =
     previous?.status === "failed" &&
@@ -134,7 +132,7 @@ export function makePrompt(run: Run, phase: Phase, seatId: string): string {
     issues: run.issues,
     // Issue details already exist in the ledger. Preserve the distinct first-pass conclusions without duplicating every issue.
     reviews: run.calls
-      .filter(call => call.purpose !== "compaction" && call.phase === "independent" && call.status === "succeeded")
+      .filter(call => isReviewCall(call) && call.phase === "independent" && call.status === "succeeded")
       .map((call, index) => {
         const review = reviewSchema.parse(call.result)
         return { reviewer: `评审员 ${index + 1}`, summary: review.summary, strengths: review.strengths }
@@ -151,7 +149,7 @@ export function makePrompt(run: Run, phase: Phase, seatId: string): string {
     .filter(
       call =>
         call.phase === "discuss" &&
-        call.purpose !== "compaction" &&
+        isReviewCall(call) &&
         call.round <= latestRound &&
         call.round >= latestRound - 1 &&
         call.status === "succeeded",

@@ -318,6 +318,10 @@ export const callSchema = z.object({
   promptHash: z.string(),
 })
 export type Call = z.infer<typeof callSchema>
+/** Tool follow-ups and compaction are receipts, not standalone structured review results. */
+export function isReviewCall(call: Pick<Call, "purpose">): boolean {
+  return call.purpose === undefined || call.purpose === "review"
+}
 export const mcpCallSchema = z.object({
   id: z.string().min(1).max(200),
   primaryCallId: z.string().min(1).max(200).optional(),

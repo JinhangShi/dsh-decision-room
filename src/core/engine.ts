@@ -9,6 +9,7 @@ import {
   configurationWarnings,
   createSchema,
   DecisionError,
+  isReviewCall,
   limitsSchema,
   organizeSchema,
   reviewSchema,
@@ -439,7 +440,7 @@ export class DecisionEngine {
   ): Promise<void> {
     const snapshot = this.store.get(id)
     const key = `${phase}:${snapshot.round}:${seatId}`
-    if (snapshot.calls.some(call => call.purpose !== "compaction" && call.key === key && call.status === "succeeded")) {
+    if (snapshot.calls.some(call => isReviewCall(call) && call.key === key && call.status === "succeeded")) {
       return
     }
     if (snapshot.status !== "running" || snapshot.epoch !== epoch) {
@@ -510,10 +511,8 @@ export class DecisionEngine {
             authorize: dispatch => this.authorizeDispatch(id, epoch, callId, model, dispatch),
             receipt: (receiptId, value, error) =>
               this.contextReceipt(id, epoch, callId, receiptId, model, value, error),
-            authorizeTool: (toolCallId, name, args) =>
-              this.authorizeTool(id, epoch, callId, toolCallId, name, args),
-            toolDecision: (toolCallId, decision, reason) =>
-              this.toolDecision(id, epoch, toolCallId, decision, reason),
+            authorizeTool: (toolCallId, name, args) => this.authorizeTool(id, epoch, callId, toolCallId, name, args),
+            toolDecision: (toolCallId, decision, reason) => this.toolDecision(id, epoch, toolCallId, decision, reason),
             toolReceipt: (toolCallId, name, content, error) =>
               this.toolReceipt(id, epoch, callId, toolCallId, name, content, error),
           },
@@ -792,7 +791,11 @@ export class DecisionEngine {
           })
         }
       }
-      event(run, error ? "mcp_failed" : "mcp_completed", error ? `MCP 调用失败：${name}` : `MCP 结果已加入证据账本：${name}`)
+      event(
+        run,
+        error ? "mcp_failed" : "mcp_completed",
+        error ? `MCP 调用失败：${name}` : `MCP 结果已加入证据账本：${name}`,
+      )
     })
   }
   private async seats(id: string, epoch: number, phase: Phase, controller: AbortController): Promise<void> {
@@ -843,7 +846,7 @@ export class DecisionEngine {
         await this.seats(id, epoch, "independent", controller)
         await this.advance(id, epoch, draft => {
           const reviews = draft.calls.filter(
-            call => call.purpose !== "compaction" && call.phase === "independent" && call.status === "succeeded",
+            call => isReviewCall(call) && call.phase === "independent" && call.status === "succeeded",
           )
           if (reviews.length === 0) throw new DecisionError("BARRIER", "独立评审尚未提交任何结果")
           if (reviews.length !== draft.config.seats.length) {
@@ -869,9 +872,8 @@ export class DecisionEngine {
         await this.call(id, epoch, "organize", "moderator", run.config.moderatorKey, controller)
         await this.advance(id, epoch, draft => {
           const result = organizeSchema.parse(
-            draft.calls.find(
-              call => call.purpose !== "compaction" && call.phase === "organize" && call.status === "succeeded",
-            )?.result,
+            draft.calls.find(call => isReviewCall(call) && call.phase === "organize" && call.status === "succeeded")
+              ?.result,
           )
           const order = result.priorityIssueIds
           const sourceIssues = new Map(draft.issues.map(issue => [issue.id, issue]))
@@ -934,8 +936,7 @@ export class DecisionEngine {
           const softClosed =
             assessment.coverageSatisfied &&
             assessment.unreviewedCriticalBlockerIds.length === 0 &&
-            (assessment.allNeedEvidence ||
-              assessment.stagnantRounds >= 3)
+            (assessment.allNeedEvidence || assessment.stagnantRounds >= 3)
           const closingCalls = draft.calls.length + draft.config.seats.length + 3 > draft.config.limits.maxCalls
           if (draft.finishRequested || softClosed || closingCalls || draft.round >= draft.config.limits.maxRounds) {
             draft.phase = "revise"
@@ -961,9 +962,8 @@ export class DecisionEngine {
         await this.call(id, epoch, "revise", "editor", run.config.moderatorKey, controller)
         await this.advance(id, epoch, draft => {
           draft.revisionResult = revisionSchema.parse(
-            draft.calls.find(
-              call => call.purpose !== "compaction" && call.phase === "revise" && call.status === "succeeded",
-            )?.result,
+            draft.calls.find(call => isReviewCall(call) && call.phase === "revise" && call.status === "succeeded")
+              ?.result,
           )
           draft.phase = "verify"
         })
@@ -971,9 +971,8 @@ export class DecisionEngine {
         await this.call(id, epoch, "verify", "verifier", run.config.verifierKey, controller)
         await this.advance(id, epoch, draft => {
           draft.verification = verificationSchema.parse(
-            draft.calls.find(
-              call => call.purpose !== "compaction" && call.phase === "verify" && call.status === "succeeded",
-            )?.result,
+            draft.calls.find(call => isReviewCall(call) && call.phase === "verify" && call.status === "succeeded")
+              ?.result,
           )
           for (const issue of draft.issues) {
             const verdict = draft.verification.issues.find(item => item.issueId === issue.id)!
