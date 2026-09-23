@@ -60,6 +60,19 @@ export type ClientContext = {
   effect(setup: () => void | (() => void)): unknown
 }
 
+export function selectWorkspace(
+  workspaces: Workspace[],
+  recentWorkspaceId: string | undefined,
+  sessionId: string | undefined,
+  sessionCwd: string | undefined,
+): Workspace | undefined {
+  return (
+    workspaces.find(item => sessionCwd !== undefined && item.path === sessionCwd) ??
+    workspaces.find(item => sessionId !== undefined && item.sessionIds?.includes(sessionId)) ??
+    workspaces.find(item => item.workspaceId === recentWorkspaceId)
+  )
+}
+
 /** Reuse the durable decision-room session after the sidebar or page is closed. */
 export function selectDecisionSession(
   snapshot: SessionListSnapshot,
@@ -82,9 +95,8 @@ export function selectDecisionSession(
 }
 function workspaceFor(ctx: ClientContext, sessionId?: string): Workspace {
   const snapshot = ctx.workspaces.list.getSnapshot()
-  const workspace =
-    snapshot.items?.find(item => sessionId && item.sessionIds?.includes(sessionId)) ??
-    snapshot.items?.find(item => item.workspaceId === snapshot.recentWorkspaceId)
+  const sessionCwd = sessionId ? ctx.sessions.list.getSnapshot().byId?.[sessionId]?.cwd : undefined
+  const workspace = selectWorkspace(snapshot.items ?? [], snapshot.recentWorkspaceId, sessionId, sessionCwd)
   if (!workspace?.path) {
     throw new Error("请先选择有本地路径的工作空间，再进入决策室")
   }

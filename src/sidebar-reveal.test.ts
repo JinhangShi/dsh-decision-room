@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { SidebarState } from "dsh-better-sidebar/client/service"
 import { createSidebarAutoOpen, createSidebarReveal } from "./sidebar-reveal.js"
-import { selectDecisionSession } from "./client.js"
+import { selectDecisionSession, selectWorkspace } from "./client.js"
 
 function fixture(placement: "right" | "bottom" | "float" = "right") {
   const tab = { id: "decision", type: "dsh-decision-room:workbench", title: "决策室" }
@@ -32,6 +32,20 @@ function fixture(placement: "right" | "bottom" | "float" = "right") {
 }
 
 describe("DSH collapsed sidebar compatibility", () => {
+  it("刷新恢复时通过会话 cwd 找回尚未写入 sessionIds 的工作空间", () => {
+    expect(
+      selectWorkspace(
+        [
+          { workspaceId: "other", path: "/other", sessionIds: ["main"] },
+          { workspaceId: "review", path: "/workspace", sessionIds: [] },
+        ],
+        "other",
+        "session-dsh-decision-room-running",
+        "/workspace",
+      ),
+    ).toMatchObject({ workspaceId: "review", path: "/workspace" })
+  })
+
   it("重新打开入口时优先复用同工作空间已有的运行中决策会话", () => {
     const snapshot = {
       current: "main",
