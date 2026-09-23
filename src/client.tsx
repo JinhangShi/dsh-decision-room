@@ -16,6 +16,11 @@ export const inject = ["slots", "sessions", "workspaces", "conversationEvents"] 
 const PREFIX = "session-dsh-decision-room-"
 const TAB = "dsh-decision-room:workbench"
 type Workspace = { workspaceId: string; path?: string; sessionIds?: string[] }
+type SessionListSnapshot = {
+  current?: string
+  ids?: string[]
+  byId?: Record<string, { blank?: boolean; cwd?: string }>
+}
 export type ClientContext = {
   slots: {
     inject(name: string, setup: () => void | (() => void)): unknown
@@ -32,7 +37,7 @@ export type ClientContext = {
   }
   sessions: {
     list: {
-      getSnapshot(): { current?: string; ids?: string[]; byId?: Record<string, { blank?: boolean; cwd?: string }> }
+      getSnapshot(): SessionListSnapshot
     }
     binding(id: string):
       | {
@@ -53,6 +58,27 @@ export type ClientContext = {
   conversationEvents: ConversationEvents
   inject(deps: string[], setup: (context: ClientContext) => void): unknown
   effect(setup: () => void | (() => void)): unknown
+}
+
+/** Reuse the durable decision-room session after the sidebar or page is closed. */
+export function selectDecisionSession(
+  snapshot: SessionListSnapshot,
+  workspacePath: string,
+  archived: string[],
+  running: (sessionId: string) => boolean,
+): string | undefined {
+  const candidates = [...new Set([snapshot.current, ...(snapshot.ids ?? [])])].filter(
+    (id): id is string =>
+      typeof id === "string" &&
+      id.startsWith(PREFIX) &&
+      snapshot.byId?.[id]?.cwd === workspacePath &&
+      !archived.includes(id),
+  )
+  return (
+    candidates.find(id => running(id)) ??
+    candidates.find(id => snapshot.byId?.[id]?.blank !== true) ??
+    candidates.find(id => snapshot.byId?.[id]?.blank === true)
+  )
 }
 function workspaceFor(ctx: ClientContext, sessionId?: string): Workspace {
   const snapshot = ctx.workspaces.list.getSnapshot()
@@ -392,13 +418,11 @@ export function apply(ctx: ClientContext): void {
     const workspace = workspaceFor(ctx, before)
     const list = ctx.sessions.list.getSnapshot()
     const archived = ctx.workspaces.list.getSnapshot().archivedSessionIds ?? []
-    const reusable = [before, ...(list.ids ?? [])].find(
-      id =>
-        id !== undefined &&
-        id.startsWith(PREFIX) &&
-        list.byId?.[id]?.blank &&
-        list.byId[id]?.cwd === workspace.path &&
-        !archived.includes(id),
+    const reusable = selectDecisionSession(
+      list,
+      workspace.path ?? "",
+      archived,
+      id => ctx.sessions.binding(id)?.session.getSnapshot().running === true,
     )
     const target =
       reusable ??

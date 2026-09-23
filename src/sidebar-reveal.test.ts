@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { SidebarState } from "dsh-better-sidebar/client/service"
 import { createSidebarAutoOpen, createSidebarReveal } from "./sidebar-reveal.js"
+import { selectDecisionSession } from "./client.js"
 
 function fixture(placement: "right" | "bottom" | "float" = "right") {
   const tab = { id: "decision", type: "dsh-decision-room:workbench", title: "决策室" }
@@ -31,6 +32,32 @@ function fixture(placement: "right" | "bottom" | "float" = "right") {
 }
 
 describe("DSH collapsed sidebar compatibility", () => {
+  it("重新打开入口时优先复用同工作空间已有的运行中决策会话", () => {
+    const snapshot = {
+      current: "main",
+      ids: ["session-dsh-decision-room-old", "session-dsh-decision-room-running", "main"],
+      byId: {
+        "session-dsh-decision-room-old": { blank: false, cwd: "/workspace" },
+        "session-dsh-decision-room-running": { blank: false, cwd: "/workspace" },
+        main: { blank: false, cwd: "/workspace" },
+      },
+    }
+    expect(selectDecisionSession(snapshot, "/workspace", [], id => id.endsWith("running"))).toBe(
+      "session-dsh-decision-room-running",
+    )
+  })
+
+  it("没有运行中任务时也复用已有决策会话，不因非 blank 而新建", () => {
+    const snapshot = {
+      ids: ["session-dsh-decision-room-used", "session-dsh-decision-room-empty"],
+      byId: {
+        "session-dsh-decision-room-used": { blank: false, cwd: "/workspace" },
+        "session-dsh-decision-room-empty": { blank: true, cwd: "/workspace" },
+      },
+    }
+    expect(selectDecisionSession(snapshot, "/workspace", [], () => false)).toBe("session-dsh-decision-room-used")
+  })
+
   it("queues a reveal until the target session mounts without opening another session", () => {
     const controller = createSidebarReveal()
     const foreground = fixture()
