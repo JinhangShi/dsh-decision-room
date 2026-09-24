@@ -13,6 +13,7 @@ import type { ToolDefinition } from "@deepseek-ai/dsh-tools"
 import type { Agent, AgentHandle, AgentRegistry, PreStepDecision } from "@deepseek-ai/dsh-agent"
 import type { SessionId, SessionStore } from "@deepseek-ai/dsh-session"
 import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence"
+import { seedDescriptorTurn } from "@deepseek-ai/dsh-subagent"
 import type { TokenMeter } from "@deepseek-ai/dsh-token-meter"
 import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt"
 import { DecisionError, type Phase, type Run } from "../core/schema.js"
@@ -28,6 +29,7 @@ import { mcpBlockedReason } from "../core/mcp-status.js"
 import { assignedIssues } from "../core/prompts.js"
 import { contextError, contextEstimate, nativeInputEstimate, requestMessages } from "./request-context.js"
 import { discoverySchema, FIND_TOOLS, schemaTokens, selectTools, TOOL_TOKEN_LIMIT } from "./tool-selection.js"
+import { roleDescriptor } from "./role-sessions.js"
 export { nativeInputEstimate } from "./request-context.js"
 
 export type NativeServices = {
@@ -349,10 +351,20 @@ export class NativeGateway implements ModelGateway {
             agentOptions,
             setup,
             signal: request.signal,
+            seed: seedDescriptorTurn(
+              id,
+              undefined,
+              roleDescriptor(context.run, {
+                seatId: context.seatId,
+                phase: context.phase,
+                round: context.run.round,
+              }),
+            ),
             meta: {
               cwd: context.run.scope.workspaceId,
               parentSession: context.run.scope.sessionId as SessionId,
               origin: "subagent",
+              seedLength: 0,
               delegationDepth: 1,
               agentPreset: "standard",
             },

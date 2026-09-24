@@ -23,10 +23,12 @@ import {
 import { createRoutes, type WebServer } from "./server/routes.js"
 import { NativeGateway, type NativeServices } from "./dsh/native-gateway.js"
 import { DecisionTranscript } from "./dsh/transcript.js"
+import { repairRoleSessionCatalog } from "./dsh/role-sessions.js"
 import { DecisionChatActions, startReviewSchema, continueReviewSchema } from "./dsh/chat-actions.js"
 import { DemoGateway } from "./core/demo-gateway.js"
 import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt"
 import { KNOWN_SESSION_EVENT_TYPES } from "@deepseek-ai/dsh-session"
+import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence"
 
 export const inject = [
   "webServer",
@@ -76,7 +78,7 @@ export type HostContext = {
   agentPresets?: NativeServices["agentPresets"]
   agents?: NativeServices["agents"]
   sessions?: NativeServices["sessions"]
-  sessionPersistence?: NativeServices["sessionPersistence"]
+  sessionPersistence?: Pick<SessionPersistence, "list" | "inspect" | "prepare">
   llm?: NativeServices["llm"]
   tokenMeter?: NativeServices["tokenMeter"]
   systemPrompt?: SystemPrompt
@@ -137,6 +139,9 @@ export function apply(ctx: HostContext, config: Config = {}): void {
       : new RoutedGateway(http, llm && typeof llm.stream === "function" ? new DshGateway(llm) : undefined)
     const engine = new DecisionEngine(store, configuration.models, gateway, demo ? "demo" : "live", reviewLimits)
     await engine.initialize()
+    if (native) {
+      await repairRoleSessionCatalog(native, store.list(), message => ctx.logger?.warn?.(message))
+    }
     const transcript = native
       ? new DecisionTranscript(native, store, configuration.models, message => ctx.logger?.warn?.(message))
       : undefined
