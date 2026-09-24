@@ -51,7 +51,7 @@ describe("真实长评审故障回归", () => {
   it("重复改写并自报新信息不能阻止 Host 三轮收敛，异议仍留档", async () => {
     const { engine } = await setup(frozenGateway(true))
     const value = input()
-    value.config.limits = structuredClone(REVIEW_MODES.find(mode => mode.id === "overnight")!.limits)
+    value.config.limits = structuredClone(REVIEW_MODES.find(mode => mode.id === "deep")!.limits)
     const run = await complete(engine, value)
     expect(run.status).toBe("completed")
     expect(run.round).toBe(4)

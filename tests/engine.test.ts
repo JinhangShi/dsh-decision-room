@@ -15,18 +15,19 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 describe("决策室完整流程", () => {
-  it("四种评审模式包含持续运行的完整固定额度，默认模型目录只含已接通模型", () => {
-    expect(REVIEW_MODES.map(mode => [mode.id, mode.limits.maxDurationMinutes])).toEqual([
-      ["quick", 15],
-      ["standard", 60],
-      ["deep", 240],
-      ["overnight", 480],
+  it("三档按轮次区分且为六席逐轮讨论和收尾保留调用余量", () => {
+    expect(REVIEW_MODES.map(mode => [mode.id, mode.limits.maxRounds, mode.limits.maxCalls])).toEqual([
+      ["quick", 20, 200],
+      ["standard", 80, 800],
+      ["deep", 200, 2000],
     ])
-    expect(REVIEW_MODES.map(mode => mode.limits.tokenBudget)).toEqual([1000000, 3000000, 6000000, 15000000])
+    expect(REVIEW_MODES.map(mode => mode.limits.maxDurationMinutes)).toEqual([60, 240, 480])
+    expect(REVIEW_MODES.map(mode => mode.limits.tokenBudget)).toEqual([3000000, 10000000, 20000000])
     for (const mode of REVIEW_MODES) {
-      expect(mode.limits).toMatchObject({ maxRounds: 80, maxCalls: 400, maxMcpCalls: 100 })
+      expect(mode.limits.maxMcpCalls).toBe(1000)
+      expect(mode.limits.maxCalls).toBeGreaterThan(6 + 1 + mode.limits.maxRounds * 7 + 6)
     }
-    expect(REVIEW_MODES.find(mode => mode.id === "overnight")?.limits.callTimeoutSeconds).toBe(300)
+    expect(REVIEW_MODES.find(mode => mode.id === "deep")?.limits.callTimeoutSeconds).toBe(300)
     expect(DEFAULT_MODELS.map(model => model.key)).toEqual(["qwen", "glm", "kimi", "deepseek"])
     expect(DEFAULT_MODELS.every(model => model.enabled)).toBe(true)
   })
@@ -233,7 +234,7 @@ describe("决策室完整流程", () => {
     expect(run.status).toBe("completed")
     expect(run.round).toBe(4)
     expect(run.calls).toHaveLength(27)
-    expect(run.config.limits.maxDurationMinutes).toBe(240)
+    expect(run.config.limits.maxDurationMinutes).toBe(480)
     expect(assessDeliberation(run).stagnantRounds).toBe(3)
     expect(run.events.find(event => event.type === "discussion_closed")?.text).toContain("Host 强制收敛")
     for (const issue of assessDeliberation(run).issues) {

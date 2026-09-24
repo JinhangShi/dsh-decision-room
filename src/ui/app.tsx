@@ -106,12 +106,18 @@ export function BriefForm({
   onSubmit(brief: Brief, config: RunConfig, feedback?: string): Promise<void>
 }): JSX.Element {
   const [brief, setBrief] = useState(initialBrief)
-  const [config, setConfig] = useState(initialConfig)
-  const [reviewModeId, setReviewModeId] = useState(
+  const initialMode =
     reviewModeForLimits(initialConfig.limits)?.id ??
-      REVIEW_MODES.find(mode => mode.limits.maxDurationMinutes === initialConfig.limits.maxDurationMinutes)?.id ??
-      "standard",
-  )
+    REVIEW_MODES.find(mode => mode.limits.maxRounds >= initialConfig.limits.maxRounds)?.id ??
+    "deep"
+  const [config, setConfig] = useState(() => {
+    const mode = REVIEW_MODES.find(mode => mode.id === initialMode)!
+    return {
+      ...initialConfig,
+      limits: { ...initialConfig.limits, maxRounds: mode.limits.maxRounds, maxCalls: mode.limits.maxCalls },
+    }
+  })
+  const [reviewModeId, setReviewModeId] = useState(initialMode)
   const [templateId, setTemplateId] = useState(
     SEAT_TEMPLATES.find(
       template =>
@@ -487,7 +493,7 @@ export function BriefForm({
           {selectedFamilies.size < config.seats.length && (
             <div className="notice">部分角色使用相同模型族。多角色可切换视角，但不会被 Host 算作多个独立模型族。</div>
           )}
-          <h3>评审模式</h3>
+          <h3>讨论轮次</h3>
           <div className="review-mode-picker" role="radiogroup" aria-label="评审模式">
             {REVIEW_MODES.map(mode => (
               <button
@@ -505,13 +511,13 @@ export function BriefForm({
                 }}
               >
                 <strong>{mode.label}</strong>
-                <span>{mode.duration}</span>
+                <span>最多 {mode.limits.maxRounds} 轮</span>
               </button>
             ))}
           </div>
           <p className="mode-description">
             {REVIEW_MODES.find(mode => mode.id === reviewModeId)?.description}
-            任务满足结束条件时会提前完成。
+            观点收敛时提前完成；时间、Token 或金额额度用尽也会停止。
           </p>
           <div className="form-footer">
             <button type="button" className="secondary" onClick={() => setTab("brief")}>

@@ -52,10 +52,24 @@ try {
       "为企业服务产品建立可逆的付费试点。先访谈目标客户并确认需要解决的问题，明确交付范围和数据授权，再开展有限样本测试。记录实际客户反馈、交付投入和持续使用情况，达到预设标准后由人工决定是否扩大。所有指标暂不填虚构数字。",
     )
   await page.getByRole("button", { name: "下一步：配置成员" }).click()
+  const modes = page.getByRole("radiogroup", { name: "评审模式" })
+  assert.equal(await modes.getByRole("radio").count(), 3)
+  for (const rounds of [20, 80, 200]) {
+    const option = modes.getByRole("radio", { name: new RegExp(`最多 ${rounds} 轮`) })
+    await option.click()
+    assert.equal(await option.getAttribute("aria-checked"), "true")
+  }
   await page.getByRole("radio", { name: /快速评审/ }).click()
   await mkdir("test-results", { recursive: true })
   await page.screenshot({ path: "test-results/setup-desktop.png", fullPage: true })
+  const createResponse = page.waitForResponse(
+    response => new URL(response.url()).pathname.endsWith("/api/runs") && response.request().method() === "POST",
+  )
   await page.getByRole("button", { name: "创建并开始评审" }).click()
+  const created = await (await createResponse).json()
+  assert.equal(created.config.limits.maxRounds, 20)
+  assert.equal(created.config.limits.maxCalls, 200)
+  assert.equal(created.config.limits.maxMcpCalls, 1000)
   await page.getByRole("button", { name: "补充意见，创建下一版" }).waitFor({ timeout: 30000 })
   assert.equal(await page.getByRole("alert").count(), 0)
   assert.ok((await page.locator(".message").count()) >= 17)

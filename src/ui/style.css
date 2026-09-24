@@ -397,7 +397,7 @@ input[type="file"] {
 }
 .review-mode-picker {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: hidden;
   border: 1px solid #dce3ed;
   border-radius: 8px;

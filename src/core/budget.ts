@@ -1,5 +1,5 @@
 import type { Model } from "./models.js"
-import { DecisionError, type Call, type Phase, type Run, type Usage } from "./schema.js"
+import { DecisionError, MAX_MODEL_CALLS, type Call, type Phase, type Run, type Usage } from "./schema.js"
 
 export function estimateTokens(system: string, prompt: string, output: number): number {
   // UTF-8 byte count is a deliberately conservative input estimate, not a tokenizer claim.
@@ -47,7 +47,7 @@ export function reserveCheck(run: Run, tokens: number, cny: number | null, phase
   if (activeElapsed(run) >= limits.maxDurationMinutes * 60000) {
     throw new DecisionError("TIME_LIMIT", "已到本轮讨论时间上限，任务已暂停并保留检查点")
   }
-  if (used.calls + calls > limits.maxCalls || run.calls.length + calls > 400) {
+  if (used.calls + calls > limits.maxCalls || run.calls.length + calls > MAX_MODEL_CALLS) {
     throw new DecisionError("CALL_LIMIT", "已达到模型调用次数上限")
   }
   if (used.tokens + tokens > limits.tokenBudget) {

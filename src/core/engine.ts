@@ -177,7 +177,7 @@ export class DecisionEngine {
             )
             run.config.limits = limits
             if (["draft", "paused", "running"].includes(run.status)) this.reserveClosing(run)
-            if (run.stopCode === "CALL_LIMIT") delete run.stopCode
+            if (run.stopCode === "CALL_LIMIT" && limits.maxCalls > record.config.limits.maxCalls) delete run.stopCode
           },
           undefined,
           { preserveUpdatedAt: true },

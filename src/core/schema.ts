@@ -1,5 +1,9 @@
 import { z } from "zod"
 
+export const MAX_MCP_CALLS = 1000
+export const MAX_REVIEW_ROUNDS = 200
+export const MAX_MODEL_CALLS = 2000
+
 const short = z.string().trim().min(1).max(2000)
 const id = z.string().regex(/^[a-zA-Z0-9_.:-]{1,160}$/)
 export const scopeSchema = z.object({ sessionId: id, workspaceId: z.string().min(1).max(500) }).strict()
@@ -45,15 +49,15 @@ export const seatSchema = z
   .strict()
 export const limitsSchema = z
   .object({
-    maxRounds: z.number().int().min(1).max(80),
-    maxCalls: z.number().int().min(8).max(400),
+    maxRounds: z.number().int().min(1).max(MAX_REVIEW_ROUNDS),
+    maxCalls: z.number().int().min(8).max(MAX_MODEL_CALLS),
     maxDurationMinutes: z.number().int().min(1).max(480),
     concurrency: z.number().int().min(1).max(4),
     tokenBudget: z.number().int().min(2000).max(20000000),
     maxCostCny: z.number().positive().max(100000).nullable(),
     outputTokens: z.number().int().min(512).max(16000),
     callTimeoutSeconds: z.number().int().min(5).max(300),
-    maxMcpCalls: z.number().int().min(0).max(100).default(12),
+    maxMcpCalls: z.number().int().min(0).max(MAX_MCP_CALLS).default(12),
   })
   .strict()
 export const runConfigSchema = z
@@ -66,9 +70,9 @@ export const runConfigSchema = z
   })
 export const reviewCountLimitsSchema = z
   .object({
-    maxRounds: z.number().int().min(1).max(80),
-    maxCalls: z.number().int().min(8).max(400),
-    maxMcpCalls: z.number().int().min(0).max(100),
+    maxRounds: z.number().int().min(1).max(MAX_REVIEW_ROUNDS).optional(),
+    maxCalls: z.number().int().min(8).max(MAX_MODEL_CALLS).optional(),
+    maxMcpCalls: z.number().int().min(0).max(MAX_MCP_CALLS).optional(),
   })
   .strict()
 export type ReviewCountLimits = z.infer<typeof reviewCountLimitsSchema>
@@ -410,11 +414,11 @@ export const runSchema = z.object({
     })
     .optional(),
   finishRequested: z.boolean(),
-  calls: z.array(callSchema).max(400),
+  calls: z.array(callSchema).max(MAX_MODEL_CALLS),
   issues: z.array(issueSchema).max(48),
   events: z.array(eventSchema),
-  mcpCalls: z.array(mcpCallSchema).max(500).default([]),
-  mcpEvidence: z.array(mcpEvidenceSchema).max(500).default([]),
+  mcpCalls: z.array(mcpCallSchema).max(MAX_MCP_CALLS).default([]),
+  mcpEvidence: z.array(mcpEvidenceSchema).max(MAX_MCP_CALLS).default([]),
   revisionResult: revisionSchema.optional(),
   verification: verificationSchema.optional(),
   humanDecision: z.object({ decision: z.enum(["adopt", "reject", "defer"]), reason: short, at: z.number() }).optional(),
@@ -426,82 +430,60 @@ export const REVIEW_MODES = [
   {
     id: "quick",
     label: "快速评审",
-    duration: "约 15 分钟",
-    description: "聚焦主要分歧，完成最低独立覆盖后尽快形成修订方案。",
+    description: "集中处理关键分歧，适合范围明确的决策。",
     limits: {
-      maxRounds: 80,
-      maxCalls: 400,
-      maxDurationMinutes: 15,
-      concurrency: 2,
-      tokenBudget: 1000000,
-      maxCostCny: null,
-      outputTokens: 8000,
-      callTimeoutSeconds: 90,
-      maxMcpCalls: 100,
-    },
-  },
-  {
-    id: "standard",
-    label: "标准评审",
-    duration: "约 1 小时",
-    description: "允许多轮改票和补充质询，为格式重试与上下文处理保留余量。",
-    limits: {
-      maxRounds: 80,
-      maxCalls: 400,
+      maxRounds: 20,
+      maxCalls: 200,
       maxDurationMinutes: 60,
       concurrency: 2,
       tokenBudget: 3000000,
       maxCostCny: null,
       outputTokens: 8000,
       callTimeoutSeconds: 120,
-      maxMcpCalls: 100,
+      maxMcpCalls: MAX_MCP_CALLS,
+    },
+  },
+  {
+    id: "standard",
+    label: "标准评审",
+    description: "为交叉质询、补充证据和多轮修订保留空间。",
+    limits: {
+      maxRounds: 80,
+      maxCalls: 800,
+      maxDurationMinutes: 240,
+      concurrency: 2,
+      tokenBudget: 10000000,
+      maxCostCny: null,
+      outputTokens: 8000,
+      callTimeoutSeconds: 180,
+      maxMcpCalls: MAX_MCP_CALLS,
     },
   },
   {
     id: "deep",
     label: "深度评审",
-    duration: "约 4 小时",
-    description: "适合材料复杂、争议较多且需要持续交叉质询的高风险决策。",
+    description: "适合材料复杂、争议持续、需要多次补证的决策。",
     limits: {
-      maxRounds: 80,
-      maxCalls: 400,
-      maxDurationMinutes: 240,
-      concurrency: 2,
-      tokenBudget: 6000000,
-      maxCostCny: null,
-      outputTokens: 8000,
-      callTimeoutSeconds: 180,
-      maxMcpCalls: 100,
-    },
-  },
-  {
-    id: "overnight",
-    label: "持续评审",
-    duration: "最长 8 小时",
-    description:
-      "适合长时间无人值守运行，为持续交叉质询、格式重试和复杂材料处理预留充足额度。若观点提前收敛会提前完成。",
-    limits: {
-      maxRounds: 80,
-      maxCalls: 400,
+      maxRounds: MAX_REVIEW_ROUNDS,
+      maxCalls: MAX_MODEL_CALLS,
       maxDurationMinutes: 480,
       concurrency: 2,
-      tokenBudget: 15000000,
+      tokenBudget: 20000000,
       maxCostCny: null,
       outputTokens: 10000,
       callTimeoutSeconds: 300,
-      maxMcpCalls: 100,
+      maxMcpCalls: MAX_MCP_CALLS,
     },
   },
 ] as const satisfies ReadonlyArray<{
   id: string
   label: string
-  duration: string
   description: string
   limits: RunConfig["limits"]
 }>
 export type ReviewModeId = (typeof REVIEW_MODES)[number]["id"]
 export function reviewModeForLimits(limits: RunConfig["limits"]): (typeof REVIEW_MODES)[number] | undefined {
-  return REVIEW_MODES.find(mode => JSON.stringify(mode.limits) === JSON.stringify(limits))
+  return REVIEW_MODES.find(mode => mode.limits.maxRounds === limits.maxRounds)
 }
 export const DEFAULT_LIMITS: RunConfig["limits"] = structuredClone(
   REVIEW_MODES.find(mode => mode.id === "standard")!.limits,
