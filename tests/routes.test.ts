@@ -56,38 +56,18 @@ describe("本地访问与任务授权边界", () => {
     expect(result.status).toBe(403)
     expect(engine.store.list()).toHaveLength(0)
   })
-  it("网关设置只返回公开状态，不返回 API Key，并支持清除", async () => {
+  it("读取模型前刷新宿主目录，且不暴露插件网关设置接口", async () => {
     const { engine } = await setup()
-    const env = { AI_GATEWAY_BASE_URL: "https://old.example/api/v1", AI_GATEWAY_API_KEY: "old-secret" }
-    const routes = createRoutes(engine, new URL("../lib/web/", import.meta.url), {
-      env,
-      async test() {
-        return { returnedModel: "test-model" }
-      },
+    let refreshes = 0
+    const routes = createRoutes(engine, new URL("../lib/web/", import.meta.url), async () => {
+      refreshes += 1
     })
-    const bootstrap = (await invoke(routes, request("/decision-room/api/bootstrap"))).json() as {
-      token: string
-      gateway: { configured: boolean; baseUrl: string }
-    }
-    expect(bootstrap.gateway).toEqual({ configured: true, baseUrl: "https://old.example/api/v1" })
-    expect(JSON.stringify(bootstrap)).not.toContain("old-secret")
+    const bootstrap = (await invoke(routes, request("/decision-room/api/bootstrap"))).json() as { token: string }
+    expect(refreshes).toBe(1)
+    expect(bootstrap).not.toHaveProperty("gateway")
     const headers = { "x-decision-token": bootstrap.token, "content-type": "application/json" }
-    const saved = await invoke(
-      routes,
-      request(
-        "/decision-room/api/settings",
-        "PUT",
-        { baseUrl: "https://new.example/api/v1", apiKey: "new-secret" },
-        headers,
-      ),
-    )
-    expect(saved.status).toBe(200)
-    expect(saved.text).not.toContain("new-secret")
-    expect(env).toMatchObject({ AI_GATEWAY_BASE_URL: "https://new.example/api/v1", AI_GATEWAY_API_KEY: "new-secret" })
-    const cleared = await invoke(routes, request("/decision-room/api/settings", "DELETE", undefined, headers))
-    expect(cleared.status).toBe(200)
-    expect(cleared.text).not.toContain("new-secret")
-    expect(env.AI_GATEWAY_API_KEY).toBeUndefined()
+    const obsolete = await invoke(routes, request("/decision-room/api/settings", "PUT", {}, headers))
+    expect(obsolete.status).toBe(404)
   })
   it("跨会话读取、操作、导出均拒绝，合法导出包含异议", async () => {
     const { engine } = await setup()

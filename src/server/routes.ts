@@ -5,7 +5,6 @@ import { DecisionEngine, publicRun } from "../core/engine.js"
 import { defaultConfiguration, publicModels } from "../core/models.js"
 import { reportHtml, reportMarkdown } from "../core/report.js"
 import { assertScope, createSchema, DecisionError, scopeSchema } from "../core/schema.js"
-import { applyGatewaySettings, clearGatewaySettings, gatewaySettingsSchema, gatewaySettingsView } from "./config.js"
 
 export type RequestLike = AsyncIterable<Uint8Array> & {
   method?: string
@@ -84,16 +83,7 @@ const mutationSchema = z.object({ scope: scopeSchema, revision: z.number().int()
 export function createRoutes(
   engine: DecisionEngine,
   assetDirectory: URL,
-  gateway: {
-    env: NodeJS.ProcessEnv
-    test(input: unknown): Promise<{ returnedModel?: string; usage?: unknown }>
-    settings?: { save(input: unknown): Promise<void>; clear(): Promise<void> }
-  } = {
-    env: process.env,
-    async test() {
-      throw new DecisionError("GATEWAY_TEST", "当前运行模式不支持网关测试", 503)
-    },
-  },
+  refreshModels?: () => Promise<void>,
 ): (req: RequestLike, res: ResponseLike) => Promise<void> {
   // This capability stays in browser memory, never in URLs or task exports. Host is restricted to local trusted profiles.
   const token = randomBytes(32).toString("hex")
@@ -105,6 +95,7 @@ export function createRoutes(
       const url = new URL(req.url ?? "/", "http://localhost")
       const path = url.pathname.replace(/^\/decision-room/, "")
       if (req.method === "GET" && path === "/api/bootstrap") {
+        await refreshModels?.()
         const defaults = defaultConfiguration(engine.models)
         defaults.limits = engine.effectiveLimits(defaults.limits)
         return send(res, 200, {
@@ -114,7 +105,6 @@ export function createRoutes(
           contextOwner: engine.contextOwner,
           defaults,
           reviewLimits: engine.reviewLimits,
-          gateway: gatewaySettingsView(gateway.env),
         })
       }
       if (req.method === "GET" && ["", "/", "/app.js", "/app.css"].includes(path)) {
@@ -141,25 +131,8 @@ export function createRoutes(
       ) {
         throw new DecisionError("CAPABILITY", "访问凭证失效，请刷新工作台", 403)
       }
-      if (path === "/api/settings" && req.method === "GET") {
-        return send(res, 200, gatewaySettingsView(gateway.env))
-      }
-      if (path === "/api/settings" && req.method === "PUT") {
-        const input = gatewaySettingsSchema.parse(await body(req))
-        if (gateway.settings) await gateway.settings.save(input)
-        else applyGatewaySettings(gateway.env, input)
-        return send(res, 200, gatewaySettingsView(gateway.env))
-      }
-      if (path === "/api/settings" && req.method === "DELETE") {
-        if (gateway.settings) await gateway.settings.clear()
-        else clearGatewaySettings(gateway.env)
-        return send(res, 200, gatewaySettingsView(gateway.env))
-      }
-      if (path === "/api/settings/test" && req.method === "POST") {
-        const result = await gateway.test(await body(req))
-        return send(res, 200, { ok: true, returnedModel: result.returnedModel, usage: result.usage })
-      }
       if (path === "/api/runs" && req.method === "POST") {
+        await refreshModels?.()
         return send(res, 201, publicRun(await engine.create(createSchema.parse(await body(req)))))
       }
       const scope = () =>

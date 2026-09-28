@@ -6,7 +6,6 @@ import { decisionProgress } from "../dsh/messages.js"
 import { DecisionProgressCard } from "../chat-messages.js"
 import { BriefForm, EMPTY_BRIEF } from "./app.js"
 import { Api, type Bootstrap } from "./api.js"
-import { Settings } from "./settings.js"
 
 // Drafts may be incomplete while typing; full validation still happens before a review starts.
 const draftSchema = z.object({
@@ -27,7 +26,6 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
   const [boot, setBoot] = useState<Bootstrap>()
   const [run, setRun] = useState<Run>()
   const [error, setError] = useState("")
-  const [sync, setSync] = useState("输入内容后，prompt 会实时出现在主聊天输入框。")
   const pending = useRef("")
   const timer = useRef<ReturnType<typeof setTimeout>>()
   const saved = useMemo(() => {
@@ -78,12 +76,10 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
       if (event.data.type === "decision-room:composed") {
         clearTimeout(timer.current)
         setError("")
-        setSync("已同步到主聊天输入框，核对后点击发送开始评审。")
       }
       if (event.data.type === "decision-room:compose-error") {
         clearTimeout(timer.current)
         setError(event.data.message)
-        setSync("同步已暂停，卡片中的材料已保留。")
       }
     }
     window.addEventListener("message", message)
@@ -112,7 +108,6 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
       }
       pending.current = crypto.randomUUID()
       clearTimeout(timer.current)
-      setSync(changed ? "正在同步到主聊天输入框…" : "输入内容后，prompt 会实时出现在主聊天输入框。")
       window.parent.postMessage(
         {
           type: "decision-room:compose",
@@ -126,6 +121,14 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
     },
     [boot, key, scope.sessionId],
   )
+  const savedConfig =
+    boot &&
+    saved?.config &&
+    [saved.config.moderatorKey, saved.config.verifierKey, ...saved.config.seats.map(seat => seat.modelKey)].every(key =>
+      boot.models.some(model => model.key === key),
+    )
+      ? saved.config
+      : undefined
   return (
     <main className="decision-app chat-setup-mode sidebar-setup-mode">
       {error && (
@@ -135,16 +138,6 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
       )}
       {!boot ? (
         <p>正在读取角色与预算配置…</p>
-      ) : !progressOnly && boot.mode !== "demo" && !boot.gateway?.configured ? (
-        <Settings
-          scope={scope}
-          onSaved={() => {
-            void api
-              .bootstrap()
-              .then(setBoot)
-              .catch(cause => setError(cause instanceof Error ? cause.message : "读取配置失败"))
-          }}
-        />
       ) : progressOnly ? (
         <>
           <p className="notice">材料已发送。补充意见、暂停、继续及二次修订，请直接在主聊天完成。</p>
@@ -154,17 +147,32 @@ export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progr
             <p>等待 DSH 主持处理，调用过程将显示在主聊天。</p>
           )}
         </>
+      ) : boot.models.length === 0 ? (
+        <div className="notice">
+          <strong>没有可用于评审的 DSH 模型。</strong>
+          <p>请在 DSH「设置 → 模型」配置提供方和文本模型，并为模型设置上下文容量。</p>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() =>
+              void api
+                .bootstrap()
+                .then(setBoot)
+                .catch(cause => setError(String(cause)))
+            }
+          >
+            重新读取模型
+          </button>
+        </div>
       ) : (
         <>
-          <p role="status" className="notice sync-status">
-            {sync}
-          </p>
           <BriefForm
             models={boot.models}
+            reviewLimits={boot.reviewLimits}
             initialBrief={saved?.brief ?? EMPTY_BRIEF}
             initialConfig={{
-              ...(saved?.config ?? boot.defaults),
-              limits: { ...(saved?.config ?? boot.defaults).limits, ...boot.reviewLimits },
+              ...(savedConfig ?? boot.defaults),
+              limits: { ...(savedConfig ?? boot.defaults).limits, ...boot.reviewLimits },
             }}
             parent={null}
             composeOnly

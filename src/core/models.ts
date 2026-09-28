@@ -77,8 +77,20 @@ export function publicModels(models: Model[]): Array<Omit<Model, "apiKeyEnv" | "
 
 export function defaultConfiguration(models: Model[]): RunConfig {
   const enabled = models.filter(model => model.enabled)
+  if (enabled.length === 0) {
+    return {
+      seats: structuredClone(DEFAULT_SEATS),
+      moderatorKey: "qwen",
+      verifierKey: "kimi",
+      limits: { ...DEFAULT_LIMITS },
+    }
+  }
+  const distinctFamilies = enabled.filter(
+    (model, index) => enabled.findIndex(item => item.family === model.family) === index,
+  )
   const select = (preferred: string, index: number) =>
     enabled.find(model => model.key === preferred)?.key ??
+    distinctFamilies[index]?.key ??
     enabled[index % Math.max(1, enabled.length)]?.key ??
     preferred
   return {

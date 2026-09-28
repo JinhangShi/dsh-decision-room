@@ -165,6 +165,7 @@ export class DecisionEngine {
     await this.store.initialize()
     if (this.reviewLimits) {
       for (const record of this.store.list()) {
+        if (record.configurationHash !== hash(JSON.stringify(this.models))) continue
         const limits = this.effectiveLimits(record.config.limits)
         if (JSON.stringify(limits) === JSON.stringify(record.config.limits)) continue
         await this.store.update(
@@ -203,7 +204,11 @@ export class DecisionEngine {
           cancelActiveMcpCalls(run, "宿主重启，无法确认原 MCP 调用是否继续；记录已保留且不会自动重发")
           event(run, "recovered", run.stopReason)
         })
-        if (record.config.limits.maxDurationMinutes >= 480) unattended.add(record.id)
+        if (
+          record.config.limits.maxDurationMinutes >= 480 &&
+          record.configurationHash === hash(JSON.stringify(this.models))
+        )
+          unattended.add(record.id)
       }
     }
     for (const id of unattended) {
@@ -222,6 +227,9 @@ export class DecisionEngine {
     }
   }
   async create(inputValue: CreateInput): Promise<Run> {
+    if (this.models.length === 0) {
+      throw new DecisionError("MODEL_UNAVAILABLE", "请先在 DSH「设置 → 模型」配置可用的文本模型及上下文容量", 503)
+    }
     const input = createSchema.parse(inputValue)
     const keys = new Set([
       ...input.config.seats.map(seat => seat.modelKey),

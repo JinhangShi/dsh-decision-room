@@ -8,7 +8,6 @@ export type Bootstrap = {
   defaults: RunConfig
   reviewLimits?: ReviewCountLimits
   contextOwner?: "dsh" | "standalone"
-  gateway?: { configured: boolean; baseUrl: string }
 }
 export class Api {
   token = ""

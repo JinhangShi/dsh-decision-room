@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
+import type { CallId } from "@deepseek-ai/dsh-llm"
 import { DshGateway, HttpGateway } from "../src/core/gateway.js"
 import { DEFAULT_MODELS, modelSchema } from "../src/core/models.js"
 
@@ -74,9 +75,7 @@ describe("模型协议与身份检查", () => {
     expect(response).toMatchObject({
       text: "",
       finishReason: "tool_calls",
-      toolCalls: [
-        { id: "call-qcc-1", name: "mcp__qcc-company__search", arguments: '{"keyword":"测试企业"}' },
-      ],
+      toolCalls: [{ id: "call-qcc-1", name: "mcp__qcc-company__search", arguments: '{"keyword":"测试企业"}' }],
     })
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({
       tool_choice: "auto",
@@ -226,18 +225,51 @@ describe("模型协议与身份检查", () => {
     ]
     const gateway = new DshGateway({
       async *stream(options) {
-        expect(options.messages.map(message => ({ role: message.role, content: message.content[0]?.text }))).toEqual(
-          history,
-        )
-        expect(options.messages.every(message => message.source.kind === "plugin")).toBe(true)
-        yield { type: "reasoning-delta", text: "不应返回的推理" }
-        yield { type: "text-delta", text: "{}" }
+        expect(
+          options.messages.map(message => ({
+            role: message.role,
+            content: message.content[0]?.type === "text" ? message.content[0].text : "",
+          })),
+        ).toEqual(history)
+        expect(options.messages.map(message => message.source.kind)).toEqual(["plugin", "model", "plugin"])
+        yield { type: "reasoning-delta", index: 0, text: "不应返回的推理" }
+        yield { type: "text-delta", index: 0, text: "{}" }
         yield { type: "usage", usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 4 } }
         yield { type: "finish", reason: { kind: "stop" } }
       },
     })
     const response = await gateway.generate({ ...request(), messages: history })
-    expect(response).toEqual({ text: "{}", usage: { inputTokens: 14, outputTokens: 20, totalTokens: 34 } })
+    expect(response).toEqual({
+      text: "{}",
+      usage: { inputTokens: 14, outputTokens: 20, totalTokens: 34 },
+      finishReason: "stop",
+    })
+  })
+  it("DSH 原生流保留完整工具调用供角色会话补证", async () => {
+    const gateway = new DshGateway({
+      async *stream(options) {
+        expect(options.provider).toBe("gateway-a")
+        expect(options.tools?.[0]?.name).toBe("mcp__lookup")
+        yield {
+          type: "block-end",
+          index: 0,
+          block: { type: "tool-call", id: "call-1" as CallId, name: "mcp__lookup", arguments: '{"q":"x"}' },
+        }
+        yield { type: "usage", usage: { inputTokens: 20, outputTokens: 10 } }
+        yield { type: "finish", reason: { kind: "tool-calls" } }
+      },
+    })
+    const model = modelSchema.parse({ ...DEFAULT_MODELS[0], transport: "dsh", provider: "gateway-a" })
+    const result = await gateway.generate({
+      ...request(),
+      model,
+      tools: [{ name: "mcp__lookup", description: "查询", parameters: { type: "object" } }],
+    })
+    expect(result).toMatchObject({
+      finishReason: "tool_calls",
+      toolCalls: [{ id: "call-1", name: "mcp__lookup", arguments: '{"q":"x"}' }],
+      usage: { totalTokens: 30 },
+    })
   })
   it("Messages 输入计费包含缓存读取和缓存写入，避免低估已报告用量", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(

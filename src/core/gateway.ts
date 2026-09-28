@@ -1,5 +1,6 @@
 import type { Model } from "./models.js"
-import type { ContentBlock, Message, ToolSchema } from "@deepseek-ai/dsh-llm"
+import type { ContentBlock, LlmRuntime, Message, ToolSchema } from "@deepseek-ai/dsh-llm"
+import { createMessage } from "@deepseek-ai/dsh-llm/message"
 import { acceptsReturnedModel } from "./model-identity.js"
 import { DecisionError, type ContextEstimate, type Phase, type Run, type Usage } from "./schema.js"
 
@@ -304,37 +305,33 @@ export class HttpGateway implements ModelGateway {
   }
 }
 
-export type DshLlm = {
-  stream(options: {
-    provider: string
-    model: string
-    system: string
-    messages: Array<{
-      id: string
-      role: "user" | "assistant"
-      content: Array<{ type: "text"; text: string }>
-      source: { kind: "plugin"; plugin: string }
-    }>
-    maxTokens: number
-    signal: AbortSignal
-  }): AsyncIterable<unknown>
-}
+export type DshLlm = Pick<LlmRuntime, "stream">
 export class DshGateway implements ModelGateway {
   constructor(private runtime: DshLlm) {}
   async generate(request: ModelRequest): Promise<ModelResponse> {
     let text = ""
     let usage: Usage | undefined
     let finished = false
+    let finishReason: ModelResponse["finishReason"]
+    const toolCalls: NonNullable<ModelResponse["toolCalls"]> = []
+    const messages: Message[] =
+      request.dshMessages ??
+      (request.messages ?? [{ role: "user" as const, content: request.prompt }]).map(message =>
+        createMessage({
+          role: message.role,
+          content: [{ type: "text" as const, text: message.content }],
+          source:
+            message.role === "assistant"
+              ? { kind: "model" as const, provider: request.model.provider ?? "", model: request.model.model }
+              : { kind: "plugin" as const, plugin: "dsh-decision-room" },
+        }),
+      )
     for await (const raw of this.runtime.stream({
       provider: request.model.provider ?? "",
       model: request.model.model,
       system: request.system,
-      messages: (request.messages ?? [{ role: "user" as const, content: request.prompt }]).map(message => ({
-        id: crypto.randomUUID(),
-        role: message.role,
-        content: [{ type: "text" as const, text: message.content }],
-        source: { kind: "plugin" as const, plugin: "dsh-decision-room" },
-      })),
+      messages,
+      tools: request.tools,
       maxTokens: request.maxOutputTokens,
       signal: request.signal,
     })) {
@@ -345,7 +342,18 @@ export class DshGateway implements ModelGateway {
       if (chunk.type === "text-delta" && typeof chunk.text === "string") {
         text += chunk.text
       }
-      if (text.length > 500000) {
+      if (chunk.type === "block-end") {
+        const block = object(chunk.block)
+        if (
+          block.type === "tool-call" &&
+          typeof block.id === "string" &&
+          typeof block.name === "string" &&
+          typeof block.arguments === "string"
+        ) {
+          toolCalls.push({ id: block.id, name: block.name, arguments: block.arguments })
+        }
+      }
+      if (text.length + toolCalls.reduce((sum, call) => sum + call.arguments.length, 0) > 500000) {
         throw new GatewayError("RESPONSE_LIMIT", "宿主模型响应超过大小上限", { text: "", usage })
       }
       if (chunk.type === "usage") {
@@ -359,17 +367,23 @@ export class DshGateway implements ModelGateway {
       }
       if (chunk.type === "finish") {
         const reason = object(chunk.reason)
-        if (reason.kind !== "stop") {
+        if (reason.kind !== "stop" && reason.kind !== "tool-calls") {
           throw new GatewayError("DSH_FINISH", "宿主模型未正常结束；请检查输出上限或模型连接", { text, usage })
         }
+        finishReason = reason.kind === "tool-calls" ? "tool_calls" : "stop"
         finished = true
       }
     }
-    if (!finished || !text.trim()) {
+    if (!finished || (!text.trim() && !toolCalls.length)) {
       throw new GatewayError("DSH_EMPTY", "宿主模型未完成有效文本响应", { text, usage })
     }
     // The provider-neutral stream does not attest to the upstream response model.
-    return { text, usage }
+    return {
+      text,
+      usage,
+      ...(toolCalls.length ? { toolCalls } : {}),
+      finishReason: toolCalls.length ? "tool_calls" : finishReason,
+    }
   }
 }
 export class RoutedGateway implements ModelGateway {

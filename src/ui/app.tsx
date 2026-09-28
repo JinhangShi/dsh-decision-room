@@ -12,6 +12,7 @@ import {
   type Call,
   type Run,
   type RunConfig,
+  type ReviewCountLimits,
   type Scope,
 } from "../core/schema.js"
 import { Api, type Bootstrap } from "./api.js"
@@ -96,6 +97,7 @@ export function BriefForm({
   onSubmit,
   composeOnly = false,
   onDraftChange,
+  reviewLimits,
 }: {
   models: Model[]
   initialBrief: Brief
@@ -103,6 +105,7 @@ export function BriefForm({
   parent: Run | null
   composeOnly?: boolean
   onDraftChange?(brief: Brief, config: RunConfig): void
+  reviewLimits?: ReviewCountLimits
   onSubmit(brief: Brief, config: RunConfig, feedback?: string): Promise<void>
 }): JSX.Element {
   const [brief, setBrief] = useState(initialBrief)
@@ -110,14 +113,15 @@ export function BriefForm({
     reviewModeForLimits(initialConfig.limits)?.id ??
     REVIEW_MODES.find(mode => mode.limits.maxRounds >= initialConfig.limits.maxRounds)?.id ??
     "deep"
-  const [config, setConfig] = useState(() => {
+  const [config, setConfig] = useState<RunConfig>(() => {
     const mode = REVIEW_MODES.find(mode => mode.id === initialMode)!
     return {
       ...initialConfig,
-      limits: { ...initialConfig.limits, maxRounds: mode.limits.maxRounds, maxCalls: mode.limits.maxCalls },
+      limits: { ...initialConfig.limits, maxRounds: mode.limits.maxRounds, maxCalls: mode.limits.maxCalls, maxCostCny: null },
     }
   })
   const [reviewModeId, setReviewModeId] = useState(initialMode)
+  const modeLimits = (limits: RunConfig["limits"]): RunConfig["limits"] => ({ ...limits, ...reviewLimits })
   const [templateId, setTemplateId] = useState(
     SEAT_TEMPLATES.find(
       template =>
@@ -136,6 +140,7 @@ export function BriefForm({
     const template = SEAT_TEMPLATES.find(item => item.id === id)
     if (!template) return
     const enabled = models.filter(model => model.enabled)
+    const diverse = enabled.filter((model, index) => enabled.findIndex(item => item.family === model.family) === index)
     setTemplateId(id)
     setConfig(value => ({
       ...value,
@@ -143,6 +148,7 @@ export function BriefForm({
         ...seat,
         modelKey:
           enabled.find(model => model.key === seat.modelKey)?.key ??
+          diverse[index]?.key ??
           enabled[index % Math.max(enabled.length, 1)]?.key ??
           seat.modelKey,
       })),
@@ -495,29 +501,39 @@ export function BriefForm({
           )}
           <h3>讨论轮次</h3>
           <div className="review-mode-picker" role="radiogroup" aria-label="评审模式">
-            {REVIEW_MODES.map(mode => (
-              <button
-                type="button"
-                role="radio"
-                aria-checked={reviewModeId === mode.id}
-                className={reviewModeId === mode.id ? "selected" : ""}
-                key={mode.id}
-                onClick={() => {
-                  setReviewModeId(mode.id)
-                  setConfig({
-                    ...config,
-                    limits: structuredClone(mode.limits),
-                  })
-                }}
-              >
-                <strong>{mode.label}</strong>
-                <span>最多 {mode.limits.maxRounds} 轮</span>
-              </button>
-            ))}
+            {REVIEW_MODES.map(mode => {
+              const limits = modeLimits(mode.limits)
+              return (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={reviewModeId === mode.id}
+                  className={reviewModeId === mode.id ? "selected" : ""}
+                  key={mode.id}
+                  onClick={() => {
+                    setReviewModeId(mode.id)
+                    setConfig({
+                      ...config,
+                      limits: structuredClone(limits),
+                    })
+                  }}
+                >
+                  <strong>{mode.label}</strong>
+                  <span>最多 {limits.maxRounds} 轮</span>
+                  <span>时间：{durationLimit(limits.maxDurationMinutes)}</span>
+                  <span>模型调用：最多 {limits.maxCalls.toLocaleString()} 次</span>
+                  <span>Token：最多 {limits.tokenBudget.toLocaleString()}</span>
+                  <span>MCP 调用：最多 {limits.maxMcpCalls.toLocaleString()} 次</span>
+                  <span>并发：最多 {limits.concurrency} 次</span>
+                  <span>单次输出：最多 {limits.outputTokens.toLocaleString()} Token</span>
+                  <span>单次超时：{limits.callTimeoutSeconds} 秒</span>
+                </button>
+              )
+            })}
           </div>
           <p className="mode-description">
             {REVIEW_MODES.find(mode => mode.id === reviewModeId)?.description}
-            观点收敛时提前完成；时间、Token 或金额额度用尽也会停止。
+            观点收敛时可提前完成；达到任一时间、调用次数或 Token 预算边界会停止派发。
           </p>
           <div className="form-footer">
             <button type="button" className="secondary" onClick={() => setTab("brief")}>
@@ -841,6 +857,7 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                 parent ? { ...parent.brief, plan: parent.revisionResult?.fullPlan ?? parent.brief.plan } : EMPTY_BRIEF
               }
               initialConfig={parent?.config ?? boot.defaults ?? DEFAULT_CONFIG}
+              reviewLimits={boot.reviewLimits}
               parent={parent}
               onSubmit={async (brief, config, feedback) => {
                 const created = await api.request<Run>("/runs", "POST", {
@@ -903,9 +920,6 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                   <strong>
                     {metrics?.tokens.toLocaleString()} <em>Token</em>
                   </strong>
-                  <span>
-                    {metrics?.costCny === null ? "价格未配置 · 金额未核定" : `估算 ¥${metrics?.costCny.toFixed(4)}`}
-                  </span>
                 </div>
                 <div>
                   <small>MCP 补证</small>

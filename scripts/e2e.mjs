@@ -75,13 +75,13 @@ try {
   assert.ok((await page.locator(".message").count()) >= 17)
   await page.screenshot({ path: "test-results/discussion-desktop.png", fullPage: true })
   const sidebar = await browser.newPage({ viewport: { width: 420, height: 900 } })
-  // Reading existing progress must remain possible after gateway credentials are removed.
+  // Existing progress remains readable when the DSH model directory is temporarily empty.
   await sidebar.route("**/decision-room/api/bootstrap", async route => {
     const response = await route.fetch()
     const bootstrap = await response.json()
     await route.fulfill({
       response,
-      json: { ...bootstrap, mode: "live", gateway: { configured: false, baseUrl: "" } },
+      json: { ...bootstrap, mode: "live", models: [] },
     })
   })
   await sidebar.goto(`${origin}/decision-room/?layout=progress`)
@@ -139,7 +139,7 @@ try {
           "17 次完整模拟调用",
           "问题台账",
           "右侧栏表决详情与窄屏布局",
-          "网关未配置仍可查看已有进度",
+          "宿主模型目录为空时仍可查看已有进度",
           "完整修订与复核",
           "人工采纳",
           "HTML 下载",

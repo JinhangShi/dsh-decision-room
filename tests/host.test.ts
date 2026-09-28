@@ -66,7 +66,21 @@ describe("DSH Host 接入契约", () => {
           disposers.push(dispose)
         }
       },
-      get: () => undefined,
+      get(name) {
+        return name === "llm"
+          ? {
+              listProviders: () => [{ id: "configured-provider", name: "已配置提供方" }],
+              listModels: async () => [{ provider: "configured-provider", id: "test-model", name: "测试模型" }],
+              resolveModelInfo: async () => ({
+                provider: "configured-provider",
+                id: "test-model",
+                name: "测试模型",
+                context: { contextWindow: 64000 },
+              }),
+              async *stream() {},
+            }
+          : undefined
+      },
     }
     apply(context)
     expect(inject).toContain("storageDomain")
