@@ -63,9 +63,9 @@ export class DecisionTranscript {
     const sessionId = run.scope.sessionId as SessionId
     let session = this.services.sessions.get(sessionId)
     if (!session) {
-      const existing = (await this.services.sessionPersistence.list()).find(header => header.id === sessionId)
+      const existing = (await this.services.sessionPersistence.list()).find(entry => entry.header.id === sessionId)
       const setup = async (ctx: import("@deepseek-ai/dsh-agent").Agent["ctx"]) => {
-        await this.services.agentPresets.mount(ctx, existing?.agentPreset)
+        await this.services.agentPresets.mount(ctx, existing?.header.agentPreset)
       }
       const handle = existing
         ? await this.services.agents.resume({ resumeSessionId: sessionId, setup })
@@ -77,9 +77,13 @@ export class DecisionTranscript {
       throw new Error("主聊天与任务工作空间不一致")
     }
     const published = new Set(
-      session.events.filter(event => event.type === "decision-room/message").map(event => event.data.id),
+      session
+        .snapshotEvents()
+        .filter(event => event.type === "decision-room/message")
+        .map(event => event.data.id),
     )
-    const previous = session.events
+    const previous = session
+      .snapshotEvents()
       .filter(event => event.type === "decision-room/progress")
       .filter(event => event.data.progress.runId === run.id)
       .at(-1)

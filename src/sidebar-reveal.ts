@@ -1,73 +1,9 @@
-import type { BetterSidebarService, SidebarState, SidebarStore } from "dsh-better-sidebar/client/service"
-
-type Target = { store: Pick<SidebarStore, "reduce">; tabId: string }
-
-function contains(node: SidebarState["splits"], tabId: string): boolean {
-  return node.kind === "leaf"
-    ? node.tabs.some(tab => tab.id === tabId)
-    : node.children.some(child => contains(child, tabId))
-}
-
-function reveal(state: SidebarState, tabId: string): SidebarState {
-  if (state.floats.some(window => window.tab.id === tabId)) {
-    return state
-  }
-  if (contains(state.bottomSplits, tabId)) {
-    return state.bottomOpen ? state : { ...state, bottomOpen: true }
-  }
-  if (contains(state.splits, tabId)) {
-    return state.panelOpen ? state : { ...state, panelOpen: true }
-  }
-  return state
-}
-
-/** Sidebar 0.17 may select a tab without expanding its panel. Reveal only on an explicit open request. */
-export function createSidebarReveal() {
-  const targets = new Map<string, Target>()
-  const pending = new Set<string>()
-  let disposed = false
-  return {
-    attach(sessionId: string, target: Target): () => void {
-      if (disposed) {
-        return () => {}
-      }
-      targets.set(sessionId, target)
-      if (pending.delete(sessionId)) {
-        target.store.reduce(state => reveal(state, target.tabId))
-      }
-      return () => {
-        if (targets.get(sessionId) === target) {
-          targets.delete(sessionId)
-        }
-      }
-    },
-    request(sessionId: string): void {
-      if (disposed) {
-        return
-      }
-      const target = targets.get(sessionId)
-      if (!target) {
-        pending.add(sessionId)
-        return
-      }
-      target.store.reduce(state => reveal(state, target.tabId))
-    },
-    dispose(): void {
-      disposed = true
-      targets.clear()
-      pending.clear()
-    },
-  }
-}
+import type { BetterSidebarService } from "dsh-better-sidebar/client/service"
 
 type SidebarScope = { sessionId: string; cwd?: string }
 
 /** Opens the progress tab once per run, including when progress arrives before Better Sidebar is ready. */
-export function createSidebarAutoOpen(
-  tabType: string,
-  scopeFor: (sessionId: string) => SidebarScope | undefined,
-  requestReveal: (sessionId: string) => void,
-) {
+export function createSidebarAutoOpen(tabType: string, scopeFor: (sessionId: string) => SidebarScope | undefined) {
   let service: Pick<BetterSidebarService, "isTabEnabled" | "openTab"> | undefined
   let disposed = false
   const openedRuns = new Set<string>()
@@ -76,8 +12,7 @@ export function createSidebarAutoOpen(
     if (disposed || !service || !service.isTabEnabled(tabType)) return false
     const scope = scopeFor(sessionId)
     if (!scope) return false
-    service.openTab({ type: tabType }, scope)
-    requestReveal(sessionId)
+    service.openTab({ type: tabType, target: "right", reveal: true }, scope)
     return true
   }
   const request = (sessionId: string, runId: string): void => {

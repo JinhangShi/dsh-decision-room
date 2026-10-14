@@ -229,7 +229,7 @@ describe("真实长评审故障回归", () => {
       {
         id: "cn" as Message["id"],
         role: "user",
-        source: { kind: "plugin", plugin: "dsh-decision-room" },
+        source: { kind: "dsh-decision-room" },
         content: [{ type: "text", text: "中文评审材料".repeat(100) }],
       },
     ]
@@ -266,13 +266,13 @@ describe("真实长评审故障回归", () => {
     const own: UserMessage = {
       id: "own" as Message["id"],
       role: "user",
-      source: { kind: "plugin", plugin: "dsh-decision-room" },
+      source: { kind: "dsh-decision-room" },
       content: [{ type: "text", text: "冻结材料" }],
     }
     const foreign: UserMessage = {
       ...own,
       id: "foreign" as Message["id"],
-      source: { kind: "plugin", plugin: "other", form: "catalog" },
+      source: { kind: "tool-registry" },
       content: [{ type: "text", text: "其他技能与上下文" }],
     }
     expect(reviewMessages([foreign, own])).toEqual([own])
@@ -290,7 +290,7 @@ describe("真实长评审故障回归", () => {
       sessions: {
         get: () => ({
           header: { cwd: run.scope.workspaceId },
-          events,
+          snapshotEvents: () => events,
           append: (type: string, data: unknown) => events.push({ type, data }),
         }),
         flush: async () => true,
@@ -359,7 +359,7 @@ describe("真实长评审故障回归", () => {
       sessions: {
         get: () => ({
           header: { cwd: latest.scope.workspaceId },
-          events,
+          snapshotEvents: () => events,
           append: (type: string, data: unknown) => events.push({ type, data }),
         }),
         flush: async () => {

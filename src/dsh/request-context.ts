@@ -1,4 +1,4 @@
-import type { ContentBlock, Message, ToolSchema } from "@deepseek-ai/dsh-llm"
+import type { ContentBlock, Message, RequestMessage, ToolSchema } from "@deepseek-ai/dsh-llm"
 import type { ContextEstimate } from "../core/schema.js"
 
 const plugin = "dsh-decision-room"
@@ -9,7 +9,11 @@ export function nativeInputEstimate(system: string, messages: Message[], tools: 
       Buffer.byteLength(
         JSON.stringify({
           system,
-          messages: messages.map(message => ({ role: message.role, content: message.content })),
+          messages: messages.map(message => ({
+            role: message.role,
+            content: message.content,
+            ...(message.role === "tool" ? { toolCallId: message.toolCallId } : {}),
+          })),
           tools,
         }),
         "utf8",
@@ -27,18 +31,14 @@ function excerpt(text: string, bytes: number, note: string): string {
 }
 
 /** Build a detached request view; the immutable session and full tool receipts remain intact. */
-export function requestMessages(messages: Message[], modelKey: string): Message[] {
-  const pairedResults = new Set(
-    messages
-      .filter(message => message.source.kind === "tool")
-      .flatMap(message => message.content.filter(block => block.type === "tool-result").map(block => block.toolCallId)),
-  )
+export function requestMessages(messages: RequestMessage[], modelKey: string): Message[] {
+  const pairedResults = new Set(messages.filter(message => message.role === "tool").map(message => message.toolCallId))
   const calls = new Set<string>()
   let resultBytes = 12000
   let historyBytes = 16000
-  return messages.flatMap(message => {
-    if (message.source.kind === "plugin" && message.source.plugin === plugin && message.role === "user")
-      return [structuredClone(message)]
+  return messages.flatMap((message): Message[] => {
+    if (!message.source) return []
+    if (message.source.kind === "dsh-decision-room" && message.role === "user") return [structuredClone(message)]
     if (
       message.role === "assistant" &&
       message.source.kind === "model" &&
@@ -58,18 +58,14 @@ export function requestMessages(messages: Message[], modelKey: string): Message[
       })
       return content.length ? [{ ...message, content }] : []
     }
-    if (message.source.kind !== "tool") return []
-    const content = message.content.flatMap((block): ContentBlock[] => {
-      if (block.type !== "tool-result" || !calls.has(block.toolCallId)) return []
-      const text = block.content
-        .map(item => (item.type === "text" ? item.text : "[非文本工具结果，原文留档]"))
-        .join("\n")
-      const note = `[Host：工具结果摘录，调用 ${block.toolCallId}；完整结果保存在原始工具记录，未核验。]`
-      const bounded = excerpt(text, Math.min(4000, resultBytes), note)
-      resultBytes = Math.max(0, resultBytes - Buffer.byteLength(bounded))
-      return [{ ...block, content: [{ type: "text", text: bounded }] }]
-    })
-    return content.length ? [{ ...message, content }] : []
+    if (message.role !== "tool" || !calls.has(message.toolCallId)) return []
+    const text = message.content
+      .map(item => (item.type === "text" ? item.text : "[非文本工具结果，原文留档]"))
+      .join("\n")
+    const note = `[Host：工具结果摘录，调用 ${message.toolCallId}；完整结果保存在原始工具记录，未核验。]`
+    const bounded = excerpt(text, Math.min(4000, resultBytes), note)
+    resultBytes = Math.max(0, resultBytes - Buffer.byteLength(bounded))
+    return [{ ...message, content: [{ type: "text", text: bounded }] }]
   })
 }
 
@@ -83,10 +79,19 @@ export function contextEstimate(
 ): ContextEstimate {
   const size = (value: unknown) => Math.ceil(Buffer.byteLength(JSON.stringify(value), "utf8") / 2)
   const sum = (test: (message: Message) => boolean) =>
-    messages.filter(test).reduce((total, message) => total + size({ role: message.role, content: message.content }), 0)
+    messages.filter(test).reduce(
+      (total, message) =>
+        total +
+        size({
+          role: message.role,
+          content: message.content,
+          ...(message.role === "tool" ? { toolCallId: message.toolCallId } : {}),
+        }),
+      0,
+    )
   return {
     systemTokens: size(system),
-    materialTokens: sum(message => message.source.kind === "plugin"),
+    materialTokens: sum(message => message.source.kind === "dsh-decision-room"),
     historyTokens: sum(message => message.role === "assistant"),
     toolResultTokens: sum(message => message.source.kind === "tool"),
     toolDefinitionTokens: size(tools),

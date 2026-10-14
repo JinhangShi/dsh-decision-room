@@ -1,6 +1,10 @@
-import type { SessionHeader, SessionStore } from "@deepseek-ai/dsh-session"
+import { Session, SessionSeq, type SessionHeader, type SessionStore } from "@deepseek-ai/dsh-session"
 import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence"
-import { snapshotSubagentDescriptor } from "@deepseek-ai/dsh-subagent"
+import {
+  foldSubagentDescriptor,
+  snapshotSubagentDescriptor,
+  type OneShotSubagentDescriptorData,
+} from "@deepseek-ai/dsh-subagent"
 import type { Call, Run } from "../core/schema.js"
 
 const phases = {
@@ -26,8 +30,8 @@ export function roleDescriptor(run: Run, call: Pick<Call, "seatId" | "phase" | "
 }
 
 type CatalogServices = {
-  sessions: Pick<SessionStore, "get" | "enter" | "announce" | "flush">
-  sessionPersistence: Pick<SessionPersistence, "list" | "inspect" | "prepare">
+  sessions: Pick<SessionStore, "get" | "flush">
+  sessionPersistence: Pick<SessionPersistence, "list" | "open">
 }
 
 /** Repair only ledger-owned, idle, descriptor-less logs through the Host's exclusive session lifecycle. */
@@ -39,7 +43,9 @@ export async function repairRoleSessionCatalog(
   const result = { repaired: 0, skipped: 0, failed: 0 }
   let headers: Map<string, SessionHeader>
   try {
-    headers = new Map((await services.sessionPersistence.list()).map(header => [String(header.id), header]))
+    headers = new Map(
+      (await services.sessionPersistence.list()).map(header => [String(header.header.id), header.header]),
+    )
   } catch {
     warn("决策室角色会话目录暂时不可读，已跳过登记修复，保留原始记录，未重发模型请求")
     return { ...result, failed: 1 }
@@ -62,34 +68,30 @@ export async function repairRoleSessionCatalog(
         continue
       }
       try {
-        const inspected = await services.sessionPersistence.inspect(header.id)
-        if (!owns(inspected.meta) || inspected.events.some(event => event.type === "subagent/descriptor")) {
-          result.skipped++
-          continue
-        }
-        // Reservation prevents a competing resume from publishing this same session.
-        const preparation = await services.sessionPersistence.prepare(header.id)
+        const handle = await services.sessionPersistence.open(header.id, "write")
+        // Explicit finally also keeps failed iterations isolated when bundled for Node 22.
         try {
-          const session = preparation.session
-          if (
-            !owns(session.header) ||
-            services.sessions.get(header.id) ||
-            session.events.some(event => event.type === "subagent/descriptor")
-          ) {
+          const { events } = await handle.read()
+          if (!owns(handle.header) || services.sessions.get(header.id)) {
             result.skipped++
             continue
           }
-          const detach = services.sessions.enter(session)
-          try {
-            services.sessions.announce(session)
-            session.append("subagent/descriptor", roleDescriptor(run, call, id === roleId))
-            await services.sessions.flush(session)
-            result.repaired++
-          } finally {
-            detach()
+          const recorded = events.find(event => event.type === "subagent/descriptor")
+          const descriptor = recorded ? foldSubagentDescriptor(events) : roleDescriptor(run, call, id === roleId)
+          if (!recorded) {
+            await handle.append([
+              { type: "subagent/descriptor", seq: SessionSeq(events.length), time: Date.now(), data: descriptor! },
+            ])
+            await handle.flush()
           }
+          const catalogued =
+            descriptor?.mode === "one-shot" && descriptor.provider === "dsh-decision-room"
+              ? await registerRoleCatalog(services, handle.header, descriptor)
+              : false
+          if (!recorded || catalogued) result.repaired++
+          else result.skipped++
         } finally {
-          preparation[Symbol.dispose]()
+          await handle.close()
         }
       } catch (error) {
         result.failed++
@@ -100,4 +102,67 @@ export async function repairRoleSessionCatalog(
     }
   }
   return result
+}
+
+/** 0.2 lists children from the parent's durable catalog, not by scanning child headers. */
+async function registerRoleCatalogNow(
+  services: CatalogServices,
+  child: SessionHeader,
+  descriptor: OneShotSubagentDescriptorData,
+): Promise<boolean> {
+  const parentId = child.parentSession
+  if (!parentId) throw new Error("角色会话缺少父会话")
+  const append = (parent: Session): boolean => {
+    if (parent.header.cwd !== child.cwd) throw new Error("角色与父会话工作空间不一致")
+    if (parent.snapshotEvents().some(event => event.type === "subagent/catalog" && event.data.childId === child.id))
+      return false
+    parent.append("subagent/catalog", {
+      version: 0,
+      childId: child.id,
+      childCreatedAt: child.createdAt,
+      mode: "one-shot",
+      ...(descriptor.label === undefined ? {} : { label: descriptor.label }),
+    })
+    return true
+  }
+  const live = services.sessions.get(parentId)
+  if (live) {
+    const added = append(live)
+    // Re-flush even on a duplicate: an earlier barrier may have failed after append.
+    await services.sessions.flush(live)
+    return added
+  }
+  await using handle = await services.sessionPersistence.open(parentId, "write")
+  const { events } = await handle.read()
+  const parent = Session.create(parentId, events, handle.header, handle.inheritedEventCount)
+  if (append(parent)) {
+    await handle.append(parent.snapshotEvents().slice(events.length))
+    await handle.flush()
+    return true
+  }
+  return false
+}
+
+const catalogWrites = new WeakMap<object, Map<string, Promise<boolean>>>()
+/** Serialize cold-parent writers; separate Profiles have separate SessionStore owners. */
+export async function registerRoleCatalog(
+  services: CatalogServices,
+  child: SessionHeader,
+  descriptor: OneShotSubagentDescriptorData,
+): Promise<boolean> {
+  const key = child.parentSession ?? ""
+  let pending = catalogWrites.get(services.sessions)
+  if (!pending) {
+    pending = new Map()
+    catalogWrites.set(services.sessions, pending)
+  }
+  const task = (pending.get(key) ?? Promise.resolve(false))
+    .catch(() => false)
+    .then(() => registerRoleCatalogNow(services, child, descriptor))
+  pending.set(key, task)
+  try {
+    return await task
+  } finally {
+    if (pending.get(key) === task) pending.delete(key)
+  }
 }

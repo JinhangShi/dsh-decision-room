@@ -1,3 +1,4 @@
+import type {} from "../dsh/message-source.js"
 import type { Model } from "./models.js"
 import type { ContentBlock, LlmRuntime, Message, ToolSchema } from "@deepseek-ai/dsh-llm"
 import { createMessage } from "@deepseek-ai/dsh-llm/message"
@@ -64,7 +65,7 @@ function object(value: unknown): JsonObject {
 function count(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
 }
-function textBlocks(blocks: ContentBlock[]): string {
+function textBlocks(blocks: readonly ContentBlock[]): string {
   return blocks
     .filter((block): block is Extract<ContentBlock, { type: "text" }> => block.type === "text")
     .map(block => block.text)
@@ -72,15 +73,8 @@ function textBlocks(blocks: ContentBlock[]): string {
 }
 function chatMessages(messages: Message[]): JsonObject[] {
   return messages.flatMap<JsonObject>(message => {
-    const toolResults = message.content.filter(
-      (block): block is Extract<ContentBlock, { type: "tool-result" }> => block.type === "tool-result",
-    )
-    if (toolResults.length) {
-      return toolResults.map(toolResult => ({
-        role: "tool",
-        tool_call_id: toolResult.toolCallId,
-        content: textBlocks(toolResult.content),
-      }))
+    if (message.role === "tool") {
+      return [{ role: "tool", tool_call_id: message.toolCallId, content: textBlocks(message.content) }]
     }
     const toolCalls = message.content
       .filter((block): block is Extract<ContentBlock, { type: "tool-call" }> => block.type === "tool-call")
@@ -317,14 +311,19 @@ export class DshGateway implements ModelGateway {
     const messages: Message[] =
       request.dshMessages ??
       (request.messages ?? [{ role: "user" as const, content: request.prompt }]).map(message =>
-        createMessage({
-          role: message.role,
-          content: [{ type: "text" as const, text: message.content }],
-          source:
-            message.role === "assistant"
-              ? { kind: "model" as const, provider: request.model.provider ?? "", model: request.model.model }
-              : { kind: "plugin" as const, plugin: "dsh-decision-room" },
-        }),
+        createMessage(
+          message.role === "assistant"
+            ? {
+                role: "assistant",
+                content: [{ type: "text", text: message.content }],
+                source: { kind: "model", provider: request.model.provider ?? "", model: request.model.model },
+              }
+            : {
+                role: "user",
+                content: [{ type: "text", text: message.content }],
+                source: { kind: "dsh-decision-room" },
+              },
+        ),
       )
     for await (const raw of this.runtime.stream({
       provider: request.model.provider ?? "",

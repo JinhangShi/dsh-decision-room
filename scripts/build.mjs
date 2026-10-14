@@ -4,6 +4,24 @@ import { build } from "esbuild"
 await rm("lib", { recursive: true, force: true })
 await mkdir("lib/web", { recursive: true })
 await build({
+  entryPoints: ["src/dsh/history-migration.ts"],
+  outfile: "lib/history-migration.js",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node22",
+  packages: "external",
+})
+await build({
+  entryPoints: ["src/dsh/history-migration-cli.ts"],
+  outfile: "lib/migrate-history.js",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node22",
+  packages: "external",
+})
+await build({
   entryPoints: ["src/index.ts"],
   outfile: "lib/index.js",
   bundle: true,

@@ -39,7 +39,10 @@ export function DecisionChatMessage(props: {
         </span>
       </div>
       <div className="decision-message-markdown" data-collapsed={long && !expanded ? "true" : undefined}>
-        <MarkdownText text={!expanded && preview ? preview : message.text} />
+        <MarkdownText
+          text={!expanded && preview ? preview : message.text}
+          labels={{ code: { copyLabel: "复制", copiedLabel: "已复制" }, footnotes: "注释" }}
+        />
       </div>
       {long && (
         <button

@@ -1,67 +1,42 @@
+import type { ISessions } from "@deepseek-ai/dsh-api-session-controller/client"
+import type { IWorkspaces, WorkspaceId } from "@deepseek-ai/dsh-api-workspace-controller/client"
+import type { UiWorkspace } from "@deepseek-ai/dsh-client-ui-workspace/client"
+import type { SlotCore } from "@deepseek-ai/dsh-client-ui-slots"
+import type { UiConversation, IConversation } from "@deepseek-ai/dsh-client-ui-conversation/client"
+import type {} from "@deepseek-ai/dsh-client-ui-session/client"
+import type {} from "@deepseek-ai/dsh-client-ui-sidebar/client"
+import type { SessionId } from "@deepseek-ai/dsh-session"
 import { useEffect, useRef, useState, useSyncExternalStore } from "react"
-import { createPortal } from "react-dom"
+import { createPortal, flushSync } from "react-dom"
 import { Button } from "@deepseek-ai/dsh-client-ui-primitives"
 import type { BetterSidebarService, TabComponentProps } from "dsh-better-sidebar/client/service"
-import {
-  DecisionProgressCard,
-  decisionNodeDefinition,
-  progressNodeDefinition,
-  type ConversationEvents,
-} from "./chat-messages.js"
+import { DecisionProgressCard, decisionNodeDefinition, progressNodeDefinition } from "./chat-messages.js"
 import { DecisionChatMessage } from "./decision-chat-message.js"
 import { fillDecisionDraft, type ComposerInput } from "./composer.js"
-import { createSidebarAutoOpen, createSidebarReveal } from "./sidebar-reveal.js"
+import { createSidebarAutoOpen } from "./sidebar-reveal.js"
+import { createProgressControl } from "./progress-control.js"
 
-export const inject = ["slots", "sessions", "workspaces", "conversationEvents"] as const
+export const inject = ["slots", "sessions", "workspaces", "uiWorkspace", "uiConversation"] as const
 const PREFIX = "session-dsh-decision-room-"
 const TAB = "dsh-decision-room:workbench"
-type Workspace = { workspaceId: string; path?: string; sessionIds?: string[] }
+type Workspace = { workspaceId: string; path?: string; sessionIds?: readonly string[] }
 type SessionListSnapshot = {
-  current?: string
   ids?: string[]
-  byId?: Record<string, { blank?: boolean; cwd?: string }>
+  byId?: Record<string, { blank?: boolean; cwd?: string; retainedBy?: { mainView?: number }; updatedAt?: number }>
 }
 export type ClientContext = {
-  slots: {
-    inject(name: string, setup: () => void | (() => void)): unknown
-    register<Props extends object>(
-      descriptor: {
-        name: string
-        id: string
-        key?: string
-        order?: number
-        inject?: (sessionId: string) => Record<string, unknown>
-      },
-      component: (props: Props) => JSX.Element | null,
-    ): () => void
-  }
-  sessions: {
-    list: {
-      getSnapshot(): SessionListSnapshot
-    }
-    binding(id: string):
-      | {
-          session: {
-            getSnapshot(): { composerPhase?: string; blank?: boolean; running?: boolean }
-            subscribe(listener: () => void): () => void
-          }
-        }
-      | undefined
-    create(options: { workspaceId: string; sessionId: string }): Promise<string>
-    open(id: string): void
-    scope?(id: string): { get(name: string): unknown } | undefined
-  }
-  workspaces: {
-    list: { getSnapshot(): { items?: Workspace[]; recentWorkspaceId?: string; archivedSessionIds?: string[] } }
-  }
+  slots: Pick<SlotCore, "register"> & { inject(name: string, setup: () => void | (() => void)): unknown }
+  sessions: ISessions
+  workspaces: IWorkspaces
+  uiWorkspace: Pick<UiWorkspace, "openSession">
   betterSidebar?: BetterSidebarService
-  conversationEvents: ConversationEvents
+  uiConversation: Pick<UiConversation, "events">
   inject(deps: string[], setup: (context: ClientContext) => void): unknown
   effect(setup: () => void | (() => void)): unknown
 }
 
 export function selectWorkspace(
-  workspaces: Workspace[],
+  workspaces: readonly Workspace[],
   recentWorkspaceId: string | undefined,
   sessionId: string | undefined,
   sessionCwd: string | undefined,
@@ -73,13 +48,17 @@ export function selectWorkspace(
   )
 }
 
+/** DSH 0.2 keeps selection with the view owner; the catalog exposes main-view retention. */
+export function currentSessionId(snapshot: SessionListSnapshot): string | undefined {
+  return Object.entries(snapshot.byId ?? {}).find(([, item]) => (item.retainedBy?.mainView ?? 0) > 0)?.[0]
+}
 /** Reuse the durable decision-room session after the sidebar or page is closed. */
 export function selectDecisionSession(
   snapshot: SessionListSnapshot,
   workspacePath: string,
-  archived: string[],
+  archived: readonly string[],
 ): string | undefined {
-  const current = snapshot.current
+  const current = currentSessionId(snapshot)
   return typeof current === "string" &&
     current.startsWith(PREFIX) &&
     snapshot.byId?.[current]?.cwd === workspacePath &&
@@ -89,9 +68,13 @@ export function selectDecisionSession(
 }
 function workspaceFor(ctx: ClientContext, sessionId?: string, preferredPath?: string): Workspace {
   const snapshot = ctx.workspaces.list.getSnapshot()
-  const sessionCwd = sessionId ? ctx.sessions.list.getSnapshot().byId?.[sessionId]?.cwd : undefined
+  const sessionCwd = sessionId ? ctx.sessions.list.getSnapshot().byId?.[sessionId as SessionId]?.cwd : undefined
   const workspace =
-    selectWorkspace(snapshot.items ?? [], snapshot.recentWorkspaceId, sessionId, preferredPath ?? sessionCwd) ??
+    selectWorkspace(snapshot.items, undefined, sessionId, preferredPath ?? sessionCwd) ??
+    (!sessionId && !preferredPath
+      ? (snapshot.items.find(item => item.sessionIds.some(id => ctx.sessions.list.getSnapshot().byId[id]?.blank)) ??
+        snapshot.items[0])
+      : undefined) ??
     (preferredPath ? { workspaceId: preferredPath, path: preferredPath } : undefined)
   if (!workspace?.path) {
     throw new Error("请先选择有本地路径的工作空间，再进入决策室")
@@ -99,8 +82,8 @@ function workspaceFor(ctx: ClientContext, sessionId?: string, preferredPath?: st
   return workspace
 }
 function inputFor(ctx: ClientContext, sessionId: string): ComposerInput {
-  const scope = ctx.sessions.scope?.(sessionId)
-  const conversation = scope?.get("conversation") as { input?: { for(scope: unknown): ComposerInput } } | undefined
+  const scope = ctx.sessions.scope(sessionId as SessionId)
+  const conversation = scope?.get("conversation") as IConversation | undefined
   const input = scope && conversation?.input?.for(scope)
   if (!input) {
     throw new Error("当前会话输入框尚未就绪，请稍后重试")
@@ -211,7 +194,7 @@ function DecisionSidebar({
   visible: boolean
 }): JSX.Element {
   const frame = useRef<HTMLIFrameElement>(null)
-  const session = context.sessions.binding(sessionId)?.session
+  const session = context.sessions.binding(sessionId as SessionId)?.session
   const blank = useSyncExternalStore(
     listener => session?.subscribe(listener) ?? (() => {}),
     () => {
@@ -248,7 +231,7 @@ function DecisionSidebar({
           location.origin,
         )
       try {
-        if (!visible || context.sessions.list.getSnapshot().current !== sessionId) {
+        if (!visible || currentSessionId(context.sessions.list.getSnapshot()) !== sessionId) {
           throw new Error("请回到此会话的决策卡片继续编辑")
         }
         if (!blank) {
@@ -343,34 +326,28 @@ const CSS = `
 export function apply(ctx: ClientContext): void {
   let active = true
   let sidebar: BetterSidebarService | undefined
-  const reveal = createSidebarReveal()
-  const autoOpen = createSidebarAutoOpen(
-    TAB,
-    sessionId => {
-      try {
-        return { sessionId, cwd: workspaceFor(ctx, sessionId).path }
-      } catch {
-        return undefined
-      }
-    },
-    sessionId => reveal.request(sessionId),
-  )
+  const autoOpen = createSidebarAutoOpen(TAB, sessionId => {
+    try {
+      return { sessionId, cwd: workspaceFor(ctx, sessionId).path }
+    } catch {
+      return undefined
+    }
+  })
   ctx.effect(() => {
     const style = document.createElement("style")
     style.textContent = CSS
     document.head.append(style)
     return () => {
       active = false
-      reveal.dispose()
       autoOpen.dispose()
       style.remove()
     }
   })
-  ctx.effect(() => ctx.conversationEvents.register(decisionNodeDefinition))
-  ctx.effect(() => ctx.conversationEvents.register(progressNodeDefinition))
+  ctx.effect(() => ctx.uiConversation.events.register(decisionNodeDefinition))
+  ctx.effect(() => ctx.uiConversation.events.register(progressNodeDefinition))
   ctx.slots.inject("conversation.chat.node", () =>
     ctx.slots.register(
-      { name: "conversation.chat.node", id: "decision-room:message", key: "decision-room" },
+      { name: "conversation.chat.node", registrant: "dsh-decision-room", key: "decision-room" },
       DecisionChatMessage,
     ),
   )
@@ -378,9 +355,14 @@ export function apply(ctx: ClientContext): void {
     ctx.slots.register(
       {
         name: "conversation.chat.node",
-        id: "decision-room:progress",
+        registrant: "dsh-decision-room",
         key: "decision-room-progress",
         inject: sessionId => ({
+          control: createProgressControl(() => {
+            const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
+            if (!cwd) throw new Error("无法确认此卡片所属的工作空间，请刷新后重试")
+            return { sessionId, workspaceId: cwd }
+          }),
           request: (text: string) => fillDecisionDraft(inputFor(ctx, sessionId), text),
           onRunning: (runId: string) => autoOpen.request(sessionId, runId),
         }),
@@ -402,10 +384,6 @@ export function apply(ctx: ClientContext): void {
         hidden: true,
         component: (props: TabComponentProps) => {
           const { sessionId } = props.scope
-          useEffect(
-            () => reveal.attach(sessionId, { store: props.store, tabId: props.tab.id }),
-            [sessionId, props.store, props.tab.id],
-          )
           return (
             <DecisionSidebar
               sessionId={sessionId}
@@ -431,16 +409,21 @@ export function apply(ctx: ClientContext): void {
     if (!sidebar?.isTabEnabled(TAB)) {
       throw new Error("请先启用 Better Sidebar 和决策室标签页")
     }
-    const before = ctx.sessions.list.getSnapshot().current
+    const before = currentSessionId(ctx.sessions.list.getSnapshot())
     const workspace = workspaceFor(ctx, before)
     const list = ctx.sessions.list.getSnapshot()
     const archived = ctx.workspaces.list.getSnapshot().archivedSessionIds ?? []
     const reusable = selectDecisionSession(list, workspace.path ?? "", archived)
     const target =
       reusable ??
-      (await ctx.sessions.create({ workspaceId: workspace.workspaceId, sessionId: `${PREFIX}${crypto.randomUUID()}` }))
-    if (active && ctx.sessions.list.getSnapshot().current === before) {
-      ctx.sessions.open(target)
+      (await ctx.sessions.create({
+        workspaceId: workspace.workspaceId as WorkspaceId,
+        sessionId: `${PREFIX}${crypto.randomUUID()}` as SessionId,
+      }))
+    if (active && currentSessionId(ctx.sessions.list.getSnapshot()) === before) {
+      // DSH publishes the selection before React creates the new session's sidebar store.
+      // Commit the view before Better Sidebar writes into that store.
+      flushSync(() => ctx.uiWorkspace.openSession(target as SessionId))
       autoOpen.open(target)
     }
   }

@@ -13,7 +13,7 @@ import type { ToolDefinition } from "@deepseek-ai/dsh-tools"
 import type { Agent, AgentHandle, AgentRegistry, PreStepDecision } from "@deepseek-ai/dsh-agent"
 import type { SessionId, SessionStore } from "@deepseek-ai/dsh-session"
 import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence"
-import { seedDescriptorTurn } from "@deepseek-ai/dsh-subagent"
+import { SessionSeq } from "@deepseek-ai/dsh-session"
 import type { TokenMeter } from "@deepseek-ai/dsh-token-meter"
 import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt"
 import { DecisionError, type Phase, type Run } from "../core/schema.js"
@@ -29,14 +29,14 @@ import { mcpBlockedReason } from "../core/mcp-status.js"
 import { assignedIssues } from "../core/prompts.js"
 import { contextError, contextEstimate, nativeInputEstimate, requestMessages } from "./request-context.js"
 import { discoverySchema, FIND_TOOLS, schemaTokens, selectTools, TOOL_TOKEN_LIMIT } from "./tool-selection.js"
-import { roleDescriptor } from "./role-sessions.js"
+import { registerRoleCatalog, roleDescriptor } from "./role-sessions.js"
 export { nativeInputEstimate } from "./request-context.js"
 
 export type NativeServices = {
   agentPresets: { mount(ctx: Agent["ctx"], id?: string): Promise<unknown> }
   agents: AgentRegistry
   sessions: SessionStore
-  sessionPersistence: Pick<SessionPersistence, "list">
+  sessionPersistence: Pick<SessionPersistence, "list" | "open">
   tokenMeter: TokenMeter
   llm: LlmRuntime
 }
@@ -65,11 +65,7 @@ export function mcpToolsForPhase<T extends { name: string }>(tools: T[], phase: 
 }
 
 export function reviewMessages(messages: UserMessage[]): UserMessage[] {
-  return messages.filter(
-    message =>
-      message.source.kind === "tool" ||
-      (message.source.kind === "plugin" && message.source.plugin === "dsh-decision-room"),
-  )
+  return messages.filter(message => message.source.kind === "tool" || message.source.kind === "dsh-decision-room")
 }
 
 export function calibratedInputEstimate(run: Run, modelKey: string, estimate: number): number {
@@ -139,7 +135,9 @@ export class NativeGateway implements ModelGateway {
     readonly models: Model[],
     private http: ModelGateway,
   ) {
-    this.known = services.sessionPersistence.list().then(headers => new Set(headers.map(header => String(header.id))))
+    this.known = services.sessionPersistence
+      .list()
+      .then(headers => new Set(headers.map(header => String(header.header.id))))
     this.unregister = services.llm.registerAdapter([PROVIDER], new DecisionAdapter(this))
   }
   estimate(system: string, prompt: string, output: number): number {
@@ -152,7 +150,7 @@ export class NativeGateway implements ModelGateway {
               id: "estimate" as Message["id"],
               role: "user",
               content: [{ type: "text", text: prompt }],
-              source: { kind: "plugin", plugin: "dsh-decision-room" },
+              source: { kind: "dsh-decision-room" },
             },
           ],
           [],
@@ -161,13 +159,13 @@ export class NativeGateway implements ModelGateway {
           id: "estimate" as Message["id"],
           role: "system",
           content: [{ type: "text", text: system }],
-          source: { kind: "plugin", plugin: "dsh-decision-room" },
+          source: { kind: "system-prompt" },
         }) +
           this.services.tokenMeter.estimateMessage({
             id: "estimate-input" as Message["id"],
             role: "user",
             content: [{ type: "text", text: prompt }],
-            source: { kind: "plugin", plugin: "dsh-decision-room" },
+            source: { kind: "dsh-decision-room" },
           }) +
           512,
       ) + output
@@ -319,7 +317,7 @@ export class NativeGateway implements ModelGateway {
               {
                 id: "estimate" as Message["id"],
                 role: "user" as const,
-                source: { kind: "plugin" as const, plugin: PROVIDER },
+                source: { kind: "dsh-decision-room" as const },
                 content: [{ type: "text" as const, text: request.prompt }],
               },
             ]
@@ -351,25 +349,44 @@ export class NativeGateway implements ModelGateway {
             agentOptions,
             setup,
             signal: request.signal,
-            seed: seedDescriptorTurn(
-              id,
-              undefined,
-              roleDescriptor(context.run, {
-                seatId: context.seatId,
-                phase: context.phase,
-                round: context.run.round,
-              }),
-            ),
+            seed: [
+              {
+                type: "subagent/descriptor",
+                seq: SessionSeq(0),
+                time: Date.now(),
+                data: roleDescriptor(context.run, {
+                  seatId: context.seatId,
+                  phase: context.phase,
+                  round: context.run.round,
+                }),
+              },
+            ],
             meta: {
               cwd: context.run.scope.workspaceId,
               parentSession: context.run.scope.sessionId as SessionId,
               origin: "subagent",
-              seedLength: 0,
+              isSeeded: false,
               delegationDepth: 1,
               agentPreset: "standard",
             },
           })
       this.handles.set(id, handle)
+      try {
+        await this.services.sessions.flush(handle.agent.session)
+        await registerRoleCatalog(
+          this.services,
+          handle.agent.session.header,
+          roleDescriptor(context.run, {
+            seatId: context.seatId,
+            phase: context.phase,
+            round: context.run.round,
+          }),
+        )
+      } catch (error) {
+        await handle.dispose()
+        this.handles.delete(id)
+        throw error
+      }
       known.add(id)
       return handle.agent
     })()
@@ -440,7 +457,7 @@ export class NativeGateway implements ModelGateway {
       agent.followup({
         id: randomUUID() as Message["id"],
         role: "user",
-        source: { kind: "plugin", plugin: "dsh-decision-room" },
+        source: { kind: "dsh-decision-room" },
         content: [{ type: "text", text: request.prompt }],
       })
       await agent.whenIdle()
@@ -487,11 +504,11 @@ export class NativeGateway implements ModelGateway {
         ? (this.handles.get(options.sessionId!)?.agent.session.deriveMessages?.() ?? options.messages)
         : options.messages
     const messages = requestMessages(original, request.model.key)
-    if (!messages.some(message => message.source.kind === "plugin"))
+    if (!messages.some(message => message.source.kind === "dsh-decision-room"))
       messages.unshift({
         id: "host-material" as Message["id"],
         role: "user",
-        source: { kind: "plugin", plugin: PROVIDER },
+        source: { kind: "dsh-decision-room" },
         content: [{ type: "text", text: request.prompt }],
       })
     const selected = purpose === "compaction" ? [] : this.selectedTools(state, system, messages, output)

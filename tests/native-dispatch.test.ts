@@ -1,3 +1,4 @@
+import { Session, SessionId } from "@deepseek-ai/dsh-session"
 import { describe, expect, it } from "vitest"
 import type { Agent, AgentHandle, PreStepDecision } from "@deepseek-ai/dsh-agent"
 import type { GenerateOptions, Message, UserMessage } from "@deepseek-ai/dsh-llm"
@@ -17,11 +18,18 @@ function harness(http: ModelGateway, compact = false) {
   type PreStep = (payload: unknown, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>
   type Assembly = { contexts: unknown[]; tools: NonNullable<GenerateOptions["tools"]>; system: string }
   type Assemble = (payload: unknown, context: unknown, next: () => Promise<Assembly>) => Promise<Assembly>
+  const parent = Session.create(SessionId("session-test"), [], {
+    version: 4,
+    id: SessionId("session-test"),
+    createdAt: Date.now(),
+    isSeeded: false,
+    cwd: "/workspace/test",
+  })
   const services = {
     sessionPersistence: { list: async () => [] },
     tokenMeter: { estimateMessage: (message: Message) => JSON.stringify(message.content).length / 4 },
     llm: { registerAdapter: () => () => {} },
-    sessions: { flush: async () => true },
+    sessions: { get: () => parent, flush: async () => true },
     agentPresets: { mount: async () => {} },
     agents: {
       get: () => undefined,
@@ -41,11 +49,11 @@ function harness(http: ModelGateway, compact = false) {
             handlers.set(name, listener)
           },
         }
-        await options.setup?.(ctx as unknown as Agent["ctx"])
+        await options.setup?.(ctx as unknown as Agent["ctx"], {} as Agent)
         const agent = {
           id: options.sessionId,
           status: "idle",
-          session: { id: options.sessionId },
+          session: { header: { id: options.sessionId, createdAt: Date.now(), ...options.meta } },
           cancel: () => {},
           followup(message: UserMessage) {
             row.messages.push(message)
@@ -54,7 +62,7 @@ function harness(http: ModelGateway, compact = false) {
             const foreign: UserMessage = {
               id: "foreign-catalog" as Message["id"],
               role: "user",
-              source: { kind: "plugin", plugin: "foreign-skills", form: "catalog" },
+              source: { kind: "tool-registry" },
               content: [{ type: "text", text: "unavailable-skill-catalog" }],
             }
             const decision = await (handlers.get("agent/pre-step") as PreStep)({}, async () => ({

@@ -40,7 +40,7 @@ export const inject = [
 ] as const
 const DECISION_SESSION_EVENT_TYPES = ["decision-room/message", "decision-room/progress"] as const
 
-/** DSH rc.2 exposes its event catalog as readonly but has not added a downstream registration API yet. */
+/** DSH 0.2.0-rc.2 exposes its event catalog as readonly but has not added a downstream registration API yet. */
 export function registerDecisionSessionEvents(catalog: ReadonlySet<string>): void {
   const mutable = catalog as Set<string>
   if (typeof mutable.add !== "function") {
@@ -53,12 +53,13 @@ type Execution = {
     session: {
       id: string
       header?: { cwd?: string }
-      events?: ReadonlyArray<{ type: string; data: { id?: string; source?: { kind: string } } }>
+      snapshotEvents?(): ReadonlyArray<{ type: string; data: { id?: string; source?: { kind: string } } }>
     }
   }
 }
 function executionMessageId(execution: Execution): string | undefined {
-  return execution.agent?.session.events
+  return execution.agent?.session
+    .snapshotEvents?.()
     ?.filter(event => event.type === "user/message" && event.data.source?.kind === "user")
     .at(-1)?.data.id
 }
@@ -73,7 +74,7 @@ export type HostContext = {
   agentPresets?: NativeServices["agentPresets"]
   agents?: NativeServices["agents"]
   sessions?: NativeServices["sessions"]
-  sessionPersistence?: Pick<SessionPersistence, "list" | "inspect" | "prepare">
+  sessionPersistence?: Pick<SessionPersistence, "list" | "open">
   llm?: NativeServices["llm"]
   tokenMeter?: NativeServices["tokenMeter"]
   systemPrompt?: SystemPrompt

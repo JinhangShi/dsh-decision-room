@@ -8,13 +8,7 @@
 
 ## 安装
 
-从 npm 安装到 DSH Web Profile：
-
-```sh
-dsh plugin --profile web add dsh-decision-room@0.9.15
-```
-
-本地开发包也可以按下文的“打包与 DSH 安装”方式安装。
+当前版本为 **0.10.2**，兼容 **DSH `0.2.0-rc.2` + Better Sidebar `0.26.0`**。安装方法见下文“安装到现有 DSH”。此前的 `0.9.15` 安装包面向旧版宿主；不要将 `0.10.x` 安装到旧宿主。从旧版迁移需运行下述历史日志迁移，单纯更换插件不会转换旧日志。
 
 ## 当前功能
 
@@ -63,6 +57,8 @@ pnpm dev:demo
 
 打开 `http://127.0.0.1:4318/decision-room/`。演示模式明确标注“无外部调用”，使用确定性合成结果。
 
+`package.json` 中的 `pnpm.packageExtensions` 仅为 DSH `0.2.0-rc.2` 的 UI primitives 和 client-store 补齐发布包遗漏的运行依赖，版本依据该发行版源码，用于本地渲染和测试。插件浏览器包仍使用宿主提供的原生组件。
+
 真实模型模式只复用你已有的凭据。创建不提交 Git 的 `.env.local`：
 
 ```dotenv
@@ -79,9 +75,37 @@ pnpm dev
 
 ## 安装到现有 DSH
 
-本项目参照现有 `qcc-previsit-dsh` 的 Host/Client、Bundle patch、Session 工作台和 `storageDomain` 方式实现。参考稳定组合为 DSH `0.1.1-rc.2` + Better Sidebar `0.17.1`；候选组合为 DSH `0.1.2-rc.1` + Better Sidebar `0.18.1`。不自动升级现有宿主或其他插件。
+完整停止目标 DSH Profile 后，从 npm 安装指定版本：
 
-先构建并打包：
+```sh
+dsh plugin --profile web add dsh-better-sidebar@0.26.0 dsh-decision-room@0.10.2
+```
+
+目标宿主为 [DSH `0.2.0-rc.2`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.0-rc.2)，右侧配置卡片需要 Better Sidebar `0.26.0`。DSH 依赖固定为同一 RC 版本，避免各组件的 npm `latest` 标签指向不同版本。当前版本使用新版会话导航、聊天节点、工具消息和持久化接口，不兼容 DSH `0.1.x` 或旧版 Better Sidebar。
+
+当前本机从旧 Web Profile 升级，可在本机终端执行专用脚本（默认 CLI 在 `~/.local`，Profile 在 `~/.dsh/profiles/web`）：
+
+```sh
+node scripts/upgrade-local-dsh.mjs --plan  # 只查看升级内容
+node scripts/upgrade-local-dsh.mjs         # 先完整退出 DSH，再升级
+```
+
+脚本先将 DSH Home 备份到其私有 `backups/` 目录，并生成恢复命令；然后安装 DSH `0.2.0-rc.2`、Better Sidebar `0.26.0`、MCP Connector `0.2.70` 和本地决策室 `0.10.2` 包。按本次选定的迁移方案，从活动 bundles 中移除旧 `dsh-pre-duediligence` 和 `qcc-dsh-mcp-oauth`，保留安装及数据。脚本使用独立安装包路径，重新安装决策室并检查版本和入口内容，再迁移旧决策室日志；中途失败时停止并给出备份位置，不自动恢复或启动模型。它需要本机终端对安装目录的写入权限。
+
+升级后按脚本输出启动 Web，将 DSH 日志中带 token 的完整本地链接复制到 Safari。普通根地址可能要求认证；不要分享带 token 的链接。
+
+如果已升级宿主却遇到 `unknown historical event type "decision-room/progress"`，在本仓库构建后执行以下命令。默认仅预览；应用前须完整退出 DSH，`--root` 可指定其他 Profile 使用的会话根目录，`--session <id>` 可限制到一条主会话及直接子会话：
+
+```sh
+pnpm migrate:history
+pnpm migrate:history --apply
+```
+
+迁移先备份并核对来源哈希，再生成 `session.v4.jsonl[.zstd]`；原始 v0 日志保留。决策室消息和进度载荷保持不变，常规事件及序号引用由 DSH 官方迁移器转换；仅将本插件的一次性角色描述符升级到新版，并补齐父目录。遇到未知事件、未支持的描述符扩展、来源变化或已有目标文件会停止，不覆盖已有记录。重复执行会跳过已迁移的会话，不重新派发评审。迁移备份中的 `migration.json` 记录源文件及新文件哈希；若需回退，应先停机并核对新版日志是否已有后续写入，不能直接删除使用中的日志。
+
+主聊天按消息 ID 恢复多个评审版本。安装插件不会自动升级宿主或其他插件；请先确认目标 Profile 的版本组合。
+
+也可以从本仓库构建并安装本地包：
 
 ```sh
 pnpm build
@@ -91,7 +115,7 @@ pnpm pack --pack-destination dist
 完整停止你准备安装的 DSH Profile，然后执行：
 
 ```sh
-dsh plugin --profile web add ./dist/dsh-decision-room-0.9.15.tgz
+dsh plugin --profile web add ./dist/dsh-decision-room-0.10.2.tgz
 ```
 
 按原方式启动 DSH。先在 DSH「设置 → 模型」配置提供方、凭据、模型 ID 和上下文容量；决策室读取宿主模型目录，不读取插件自己的环境密钥：
@@ -108,7 +132,7 @@ dsh web
 
 在主聊天发送“请根据这些意见再次评审”，Agent 使用 `decision_room_continue` 创建并启动下一版，默认基于上一版修订稿及原预算。只补充或暂存意见时不自动收费续议。`decision_room_control` 控制暂停、继续、取消和收尾；`decision_room_limits` 接受用户明确要求的额度调整；`decision_room_decide` 记录人工取舍。
 
-关闭页面不停止已经授权的评审。需要停止时，在主聊天发送“暂停评审”或“取消评审”；执行卡片也提供回填指令的快捷按钮。**DSH 原生停止按钮只停止当前主持回复；评审任务以执行卡片的状态为准**。
+关闭页面不停止已经授权的评审。需要停止时，点击执行卡片的“暂停”或“取消”，按钮会直接调用 Host 控制接口，无需发送聊天消息；已有草稿保持不变，操作失败会在卡片上提示并允许重试。“继续”“进入修订”和补充意见仍通过聊天草稿提交。**DSH 原生停止按钮只停止当前主持回复；评审任务以执行卡片的状态为准**。
 
 主聊天的主持 Agent 需要使用 DSH 中已配置、支持工具调用的模型。角色调用也走 DSH 已配置的提供方，但仍由决策室 Host 记录和限制评审预算；主持的普通聊天调用不计入角色评审的调用次数。
 

@@ -10,11 +10,7 @@ import { complete, input, setup } from "./fixtures.js"
 
 describe("原生 DSH 上下文和主聊天", () => {
   it("只在首轮公开后的讨论阶段动态暴露全部 MCP 工具", () => {
-    const tools = [
-      { name: "mcp__qcc-company__search" },
-      { name: "mcp__another-server__lookup" },
-      { name: "shell" },
-    ]
+    const tools = [{ name: "mcp__qcc-company__search" }, { name: "mcp__another-server__lookup" }, { name: "shell" }]
     expect(mcpToolsForPhase(tools, "independent")).toEqual([])
     expect(mcpToolsForPhase(tools, "discuss")).toEqual(tools.slice(0, 2))
     expect(mcpToolsForPhase([...tools, { name: "mcp__newly-installed__query" }], "discuss")).toHaveLength(3)
@@ -166,7 +162,7 @@ describe("原生 DSH 上下文和主聊天", () => {
       sessions: {
         get: () => ({
           header: { cwd: run.scope.workspaceId },
-          events,
+          snapshotEvents: () => events,
           append(type: string, data: { id: string }) {
             events.push({ type, data })
           },

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import type { CallId } from "@deepseek-ai/dsh-llm"
+import type { ToolCallId } from "@deepseek-ai/dsh-llm"
 import { DshGateway, HttpGateway } from "../src/core/gateway.js"
 import { DEFAULT_MODELS, modelSchema } from "../src/core/models.js"
 
@@ -231,7 +231,11 @@ describe("模型协议与身份检查", () => {
             content: message.content[0]?.type === "text" ? message.content[0].text : "",
           })),
         ).toEqual(history)
-        expect(options.messages.map(message => message.source.kind)).toEqual(["plugin", "model", "plugin"])
+        expect(options.messages.map(message => message.source?.kind)).toEqual([
+          "dsh-decision-room",
+          "model",
+          "dsh-decision-room",
+        ])
         yield { type: "reasoning-delta", index: 0, text: "不应返回的推理" }
         yield { type: "text-delta", index: 0, text: "{}" }
         yield { type: "usage", usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 4 } }
@@ -253,7 +257,7 @@ describe("模型协议与身份检查", () => {
         yield {
           type: "block-end",
           index: 0,
-          block: { type: "tool-call", id: "call-1" as CallId, name: "mcp__lookup", arguments: '{"q":"x"}' },
+          block: { type: "tool-call", id: "call-1" as ToolCallId, name: "mcp__lookup", arguments: '{"q":"x"}' },
         }
         yield { type: "usage", usage: { inputTokens: 20, outputTokens: 10 } }
         yield { type: "finish", reason: { kind: "tool-calls" } }

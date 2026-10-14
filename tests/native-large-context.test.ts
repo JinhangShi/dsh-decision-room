@@ -40,7 +40,7 @@ describe("真实 DSH 大工具目录回归", () => {
           {
             id: "late" as Message["id"],
             role: "user",
-            source: { kind: "plugin", plugin: "late-foreign" },
+            source: { kind: "tool-registry" },
             content: [{ type: "text", text: "unavailable-skill-catalog" }],
           },
         ],
@@ -163,9 +163,7 @@ describe("真实 DSH 大工具目录回归", () => {
               ],
             }
           }
-          const results = request.dshMessages!.flatMap(message =>
-            message.content.filter(block => block.type === "tool-result"),
-          )
+          const results = request.dshMessages!.filter(message => message.role === "tool")
           expect(results.map(result => result.toolCallId)).toEqual(["find", "lookup"])
           expect(JSON.stringify(results)).toContain("Host：工具结果摘录")
           expect(Buffer.byteLength(JSON.stringify(results))).toBeLessThan(6500)

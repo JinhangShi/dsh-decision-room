@@ -1,5 +1,8 @@
-import { useEffect, useState } from "react"
+import type { ConversationNodeDefinition } from "@deepseek-ai/dsh-client-ui-conversation/client"
+import type {} from "@deepseek-ai/dsh-client-ui-chat/client"
+import { useEffect, useRef, useState } from "react"
 import type { DecisionMessage, DecisionProgress } from "./dsh/messages.js"
+import type { ProgressControl } from "./progress-control.js"
 
 type Event = { type: string; seq: number; data: unknown }
 type NodeContext = {
@@ -7,17 +10,13 @@ type NodeContext = {
   id: string
   start?: { event: Event }
   state?: unknown
-  matches?: Array<{ event: Event }>
+  matches?: readonly { event: Event }[]
 }
-export type ConversationEvents = {
-  register(definition: {
-    kind: string
-    target: string
-    match(event: Event): { id: string; role: "start" | "update" } | null
-    start(context: unknown, match: { event: Event }): unknown
-    update(context: NodeContext, match: { event: Event }): unknown
-    buildViewNode(context: NodeContext): unknown
-  }): () => void
+declare module "@deepseek-ai/dsh-client-ui-chat/client" {
+  interface ChatNodeDataMap {
+    "decision-room": DecisionMessage
+    "decision-room-progress": DecisionProgress
+  }
 }
 export const progressNodeDefinition = {
   kind: "decision-room-progress",
@@ -53,22 +52,44 @@ export const progressNodeDefinition = {
       data,
     }
   },
-}
+} satisfies ConversationNodeDefinition
 
 export function DecisionProgressCard({
   node,
   request,
+  control,
   onRunning,
   compact = false,
 }: {
   node: { data: DecisionProgress }
   request?(text: string): void
+  control?: ProgressControl
   onRunning?(runId: string): void
   compact?: boolean
 }): JSX.Element {
   const value = node.data
   const mcp = value.mcp ?? { calls: 0, limit: 0, sources: 0, failed: 0 }
   const [error, setError] = useState("")
+  const controlling = useRef(false)
+  const [pending, setPending] = useState<"pause" | "cancel" | null>(null)
+  const [confirmation, setConfirmation] = useState("")
+  useEffect(() => setConfirmation(""), [value.runId, value.status])
+  const stop = async (action: "pause" | "cancel") => {
+    if (!control || controlling.current) return
+    controlling.current = true
+    setPending(action)
+    setError("")
+    setConfirmation("")
+    try {
+      await control(value.runId, value.revision, action)
+      setConfirmation(action === "pause" ? "Host 已确认暂停" : "Host 已确认取消")
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "控制请求失败，请重试")
+    } finally {
+      controlling.current = false
+      setPending(null)
+    }
+  }
   useEffect(() => {
     if (value.status === "running") {
       onRunning?.(value.runId)
@@ -362,26 +383,37 @@ export function DecisionProgressCard({
         </details>
       )}
       <p className="decision-caption">独立首评全部提交后统一公开。补充材料、提异议和再次修订，直接在主聊天发送。</p>
-      {request && (
+      {(request || control) && (
         <div className="decision-chat-actions">
           {value.status === "running" && (
             <>
-              <button onClick={() => action("请暂停当前评审")}>暂停</button>
-              <button onClick={() => action("请结束当前讨论并生成修订与复核")}>进入修订</button>
+              {control && (
+                <button disabled={pending !== null} onClick={() => void stop("pause")}>
+                  {pending === "pause" ? "正在暂停…" : "暂停"}
+                </button>
+              )}
+              {request && (
+                <button disabled={pending !== null} onClick={() => action("请结束当前讨论并生成修订与复核")}>
+                  进入修订
+                </button>
+              )}
             </>
           )}
-          {value.status === "paused" && !value.budgetBlocked && (
+          {request && value.status === "paused" && !value.budgetBlocked && (
             <button onClick={() => action("请在原预算内从检查点继续评审")}>继续</button>
           )}
-          {value.status === "completed" && (
+          {request && value.status === "completed" && (
             <button onClick={() => action("请根据以下新增意见进行第二次评审；先等我补充具体意见")}>补充修订意见</button>
           )}
-          {value.status !== "completed" && value.status !== "cancelled" && (
-            <button onClick={() => action("请取消当前评审")}>取消</button>
+          {control && value.status !== "completed" && value.status !== "cancelled" && (
+            <button disabled={pending !== null} onClick={() => void stop("cancel")}>
+              {pending === "cancel" ? "正在取消…" : "取消"}
+            </button>
           )}
         </div>
       )}
       {error && <p role="alert">{error}</p>}
+      {confirmation && <p role="status">{confirmation}</p>}
     </section>
   )
 }
@@ -414,4 +446,4 @@ export const decisionNodeDefinition = {
       data: context.state,
     }
   },
-}
+} satisfies ConversationNodeDefinition

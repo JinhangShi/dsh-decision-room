@@ -1,3 +1,9 @@
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import SessionProjectionRegistry from "@deepseek-ai/dsh-session-projection"
+import JsonlSessionPersistence from "@deepseek-ai/dsh-session-persistence-jsonl"
+import { SessionId } from "@deepseek-ai/dsh-session"
 import { Context } from "@deepseek-ai/cordis"
 import AgentRegistry from "@deepseek-ai/dsh-agent"
 import AgentLoop from "@deepseek-ai/dsh-agent-loop"
@@ -13,22 +19,25 @@ import { until } from "./fixtures.js"
 
 /** Real Cordis waterfalls, AgentLoop, tool execution, session replay and LLM routing. Only the upstream is fake. */
 export async function nativeRuntime(http: ModelGateway, definitions: ToolDefinition[] = [], models = DEFAULT_MODELS) {
+  const root = await mkdtemp(join(tmpdir(), "decision-native-"))
   const ctx = new Context()
   ctx.plugin(SystemPrompt, {})
   ctx.plugin(SessionStore)
+  ctx.plugin(SessionProjectionRegistry)
+  ctx.plugin(JsonlSessionPersistence, { root, compression: "none" })
   ctx.plugin(LlmRuntime)
   ctx.plugin(AgentRegistry)
   ctx.plugin(TokenMeter, {})
   ctx.plugin(ToolRuntime, {})
   ctx.plugin(AgentLoop, { agents: [] })
-  await until(() => Boolean(ctx.get("agentLoop")))
+  await until(() => Boolean(ctx.get("agentLoop") && ctx.get("sessionPersistence")))
   definitions.forEach(tool => ctx.tools.register(tool))
   const services = {
     agents: ctx.agents,
     sessions: ctx.sessions,
     llm: ctx.llm,
     tokenMeter: ctx.tokenMeter,
-    sessionPersistence: { list: async () => [] },
+    sessionPersistence: ctx.sessionPersistence,
     agentPresets: {
       async mount(scope) {
         scope.on("agent/pre-step", async (_payload, next) => {
@@ -45,12 +54,17 @@ export async function nativeRuntime(http: ModelGateway, definitions: ToolDefinit
     },
   } satisfies NativeServices
   const gateway = new NativeGateway(services, models, http)
+  const parent = await ctx.agents.create({ sessionId: SessionId("session-test"), meta: { cwd: "/workspace/test" } })
   return {
+    root,
+    parent,
     ctx,
     gateway,
     async dispose() {
       await gateway.dispose()
+      await parent.dispose()
       await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
     },
   }
 }
