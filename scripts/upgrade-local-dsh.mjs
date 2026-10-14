@@ -11,7 +11,7 @@ const dshHome = resolve(process.env.DSH_HOME ?? join(homedir(), ".dsh"))
 const profile = join(dshHome, "profiles", "web")
 const manifestPath = join(profile, "package.json")
 const launcher = join(prefix, "bin", "dsh")
-const archive = join(repository, "dist", "dsh-decision-room-0.10.2.tgz")
+const archive = join(repository, "dist", "dsh-decision-room-0.10.6.tgz")
 const disabled = ["dsh-pre-duediligence", "qcc-dsh-mcp-oauth"]
 const target = "0.2.0-rc.2"
 const env = { ...process.env, DSH_HOME: dshHome }
@@ -29,10 +29,10 @@ try {
   if (!Array.isArray(manifest.dsh?.profile?.bundles)) throw new Error("Web Profile 缺少 bundles 配置，停止升级")
   const previous = run(launcher, ["--version"], true)
   const packaged = JSON.parse(run("tar", ["-xOf", archive, "package/package.json"], true))
-  if (packaged.name !== "dsh-decision-room" || packaged.version !== "0.10.2" || packaged.engines?.dsh !== target) {
+  if (packaged.name !== "dsh-decision-room" || packaged.version !== "0.10.6" || packaged.engines?.dsh !== target) {
     throw new Error("本地安装包与目标版本不一致，请重新构建并打包")
   }
-  console.log(`DSH ${previous} → ${target}；Better Sidebar → 0.26.0；MCP Connector → 0.2.70；决策室 → 0.10.2`)
+  console.log(`DSH ${previous} → ${target}；Better Sidebar → 0.26.0；MCP Connector → 0.2.70；决策室 → 0.10.6`)
   console.log(`安装目录：${prefix}\nProfile：${profile}\n停用但保留安装和数据：${disabled.join("、")}`)
   if (process.argv.includes("--plan")) process.exit(0)
   if (process.argv.slice(2).length) throw new Error("只支持可选参数 --plan")
@@ -63,7 +63,7 @@ try {
     { mode: 0o600 },
   )
   // A unique archive path avoids reusing cached contents when rebuilding the same local version.
-  const installArchive = join(backup, "dsh-decision-room-0.10.2.tgz")
+  const installArchive = join(backup, "dsh-decision-room-0.10.6.tgz")
   await copyFile(archive, installArchive)
   run("npm", ["install", "--global", "--prefix", prefix, "--no-audit", "--no-fund", `@deepseek-ai/dsh@${target}`])
   if (run(launcher, ["--version"], true) !== target) throw new Error("安装后的 DSH 版本不符合预期")
@@ -91,7 +91,7 @@ try {
   for (const [name, version] of [
     ["dsh-better-sidebar", "0.26.0"],
     ["dsh-mcp-connector", "0.2.70"],
-    ["dsh-decision-room", "0.10.2"],
+    ["dsh-decision-room", "0.10.6"],
   ]) {
     const installed = JSON.parse(await readFile(join(profile, "node_modules", name, "package.json"), "utf8"))
     if (installed.version !== version) throw new Error(`${name} 安装后的版本不符合预期`)

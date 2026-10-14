@@ -1,5 +1,6 @@
 import type {} from "@deepseek-ai/dsh-session"
 import type { Model } from "../core/models.js"
+import { progressSummary } from "../core/call-display.js"
 import { reportMarkdown } from "../core/report.js"
 import { budgetBlocked, spent } from "../core/budget.js"
 import { assessDeliberation, discussionDelta } from "../core/deliberation.js"
@@ -83,6 +84,8 @@ export type DecisionProgress = {
     status: string
     purpose?: string
     tokens: number
+    accounting?: Run["calls"][number]["accounting"]
+    progressSummary?: string
     notSent?: boolean
     error?: string
   }>
@@ -164,7 +167,7 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
     }
   })
   return {
-    projectionVersion: 3,
+    projectionVersion: 4,
     id: `${run.id}:progress`,
     runId: run.id,
     revision: run.revision,
@@ -205,6 +208,8 @@ export function decisionProgress(run: Run, models: Model[]): DecisionProgress {
       status: call.status,
       ...(call.purpose ? { purpose: call.purpose } : {}),
       tokens: call.accountedTokens,
+      accounting: call.accounting,
+      ...(call.progress ? { progressSummary: progressSummary(call.progress) } : {}),
       notSent: call.dispatchState === "not_sent",
       ...(call.error ? { error: call.error } : {}),
     })),

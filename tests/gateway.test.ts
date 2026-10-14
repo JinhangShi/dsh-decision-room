@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import type { ToolCallId } from "@deepseek-ai/dsh-llm"
+import type { ToolCallId, FinishReason } from "@deepseek-ai/dsh-llm"
+import type { CallProgress } from "../src/core/schema.js"
 import { DshGateway, HttpGateway } from "../src/core/gateway.js"
 import { DEFAULT_MODELS, modelSchema } from "../src/core/models.js"
 
@@ -249,6 +250,42 @@ describe("模型协议与身份检查", () => {
       finishReason: "stop",
     })
   })
+  it.each([
+    [{ kind: "max-tokens" }, "TRUNCATED"],
+    [{ kind: "aborted", failure: { code: "ABORTED", message: "fixture-secret" } }, "ABORTED"],
+    [{ kind: "error", failure: { code: "UNKNOWN", message: "fixture-secret" } }, "DSH_FINISH"],
+  ] satisfies Array<[FinishReason, string]>)(
+    "DSH 保留结束分类和流元数据，隐藏原始思考与提供方错误：%j",
+    async (reason, code) => {
+      const updates: CallProgress[] = []
+      const gateway = new DshGateway({
+        async *stream() {
+          yield { type: "reasoning-delta", index: 0, text: "private reasoning" }
+          yield { type: "text-delta", index: 1, text: "{" }
+          yield { type: "usage", usage: { inputTokens: 10, outputTokens: 8000, reasoningTokens: 7999 } }
+          yield { type: "finish", reason }
+        },
+      })
+      await expect(
+        gateway.generate({
+          ...request(),
+          onProgress: async progress => {
+            updates.push(progress)
+          },
+        }),
+      ).rejects.toMatchObject({ code, response: { usage: { outputTokens: 8000, reasoningTokens: 7999 } } })
+      expect(updates[0]?.state).toBe("waiting")
+      expect(updates.some(p => p.state === "streaming" && p.reasoningChars > 0)).toBe(true)
+      expect(updates.at(-1)).toMatchObject({
+        state: "finished",
+        finishReason: reason.kind,
+        textChars: 1,
+        reasoningChars: 17,
+      })
+      expect(JSON.stringify(updates)).not.toContain("private reasoning")
+      expect(JSON.stringify(updates)).not.toContain("fixture-secret")
+    },
+  )
   it("DSH 原生流保留完整工具调用供角色会话补证", async () => {
     const gateway = new DshGateway({
       async *stream(options) {

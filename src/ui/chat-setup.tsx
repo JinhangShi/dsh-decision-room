@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { z } from "zod"
 import { runConfigSchema, sourceSchema, type Brief, type Run, type RunConfig, type Scope } from "../core/schema.js"
 import { composeDecisionRequest } from "../composer.js"
+import { draftCacheKeys } from "../draft-sync.js"
 import { decisionProgress } from "../dsh/messages.js"
 import { DecisionProgressCard } from "../chat-messages.js"
 import { BriefForm, EMPTY_BRIEF } from "./app.js"
@@ -22,7 +23,7 @@ const draftSchema = z.object({
 
 export function ChatSetup({ scope, progressOnly = false }: { scope: Scope; progressOnly?: boolean }): JSX.Element {
   const api = useMemo(() => new Api(scope), [scope.sessionId, scope.workspaceId])
-  const key = `decision-room:setup:${JSON.stringify([scope.workspaceId, scope.sessionId])}`
+  const key = draftCacheKeys(scope).setup
   const [boot, setBoot] = useState<Bootstrap>()
   const [run, setRun] = useState<Run>()
   const [error, setError] = useState("")

@@ -568,6 +568,7 @@ export class NativeGateway implements ModelGateway {
       }
       response = await this.http.generate({
         ...request,
+        onProgress: progress => request.onProgress?.(progress, receiptId) ?? Promise.resolve(),
         system,
         maxOutputTokens: output,
         messages: messages

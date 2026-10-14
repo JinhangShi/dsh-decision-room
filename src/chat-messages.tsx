@@ -3,6 +3,7 @@ import type {} from "@deepseek-ai/dsh-client-ui-chat/client"
 import { useEffect, useRef, useState } from "react"
 import type { DecisionMessage, DecisionProgress } from "./dsh/messages.js"
 import type { ProgressControl } from "./progress-control.js"
+import { accountingLabel } from "./core/call-display.js"
 
 type Event = { type: string; seq: number; data: unknown }
 type NodeContext = {
@@ -369,13 +370,14 @@ export function DecisionProgressCard({
                     {(call.attempt ?? 1) > 1 && <span>第 {call.attempt} 次尝试</span>}
                   </div>
                   {call.error && <p>{call.error}</p>}
+                  {call.progressSummary && <p>{call.progressSummary}</p>}
                 </div>
                 <div className="decision-call-result">
                   <span className="decision-call-status">
                     {call.notSent ? "未发送" : (callStatus[call.status]?.label ?? call.status)}
                   </span>
                   <strong>{call.tokens.toLocaleString()}</strong>
-                  <small>Token</small>
+                  <small>{accountingLabel(call.accounting)} · Token</small>
                 </div>
               </li>
             ))}

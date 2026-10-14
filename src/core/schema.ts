@@ -42,7 +42,7 @@ export const seatSchema = z
     name: z.string().min(1).max(60),
     mandate: z.string().min(1).max(3000),
     modelKey: id,
-    perspective: z.enum(["business", "delivery", "risk", "challenge", "domain"]).optional(),
+    perspective: z.string().trim().min(1).max(120).optional(),
     // Canonicalized by the Host at creation time. Optional for durable pre-0.5 records.
     modelFamily: z.string().min(1).max(80).optional(),
   })
@@ -57,6 +57,8 @@ export const limitsSchema = z
     maxCostCny: z.number().positive().max(100000).nullable(),
     outputTokens: z.number().int().min(512).max(16000),
     callTimeoutSeconds: z.number().int().min(5).max(300),
+    // Optional so persisted runs retain their original total timeout policy.
+    callIdleTimeoutSeconds: z.number().int().min(5).max(300).optional(),
     maxMcpCalls: z.number().int().min(0).max(MAX_MCP_CALLS).default(12),
   })
   .strict()
@@ -236,7 +238,7 @@ export function configurationWarnings(config: RunConfig): string[] {
   const missing = labels.filter(([key]) => !perspectives.has(key)).map(([, label]) => label)
   const families = new Set(config.seats.map(seat => seat.modelFamily ?? seat.modelKey))
   return [
-    ...(missing.length ? [`席位配置缺少${missing.join("、")}；高风险评审可能存在盲区`] : []),
+    ...(missing.length ? [`席位配置缺少${missing.join("、")}预设；请确认自定义视角或职责已覆盖这些方面`] : []),
     ...(families.size < 2 ? ["席位仅覆盖一个模型族，无法形成跨模型族独立复核"] : []),
     ...(families.size < config.seats.length ? ["部分席位使用同一模型族；不同角色不会被 Host 算作多个独立模型族"] : []),
   ]
@@ -302,6 +304,7 @@ export const usageSchema = z.object({
   inputTokens: z.number().nonnegative(),
   outputTokens: z.number().nonnegative(),
   totalTokens: z.number().nonnegative(),
+  reasoningTokens: z.number().nonnegative().optional(),
 })
 export type Usage = z.infer<typeof usageSchema>
 export const contextEstimateSchema = z.object({
@@ -320,6 +323,17 @@ export const contextEstimateSchema = z.object({
   messageIds: z.array(z.string()).optional(),
 })
 export type ContextEstimate = z.infer<typeof contextEstimateSchema>
+export const callProgressSchema = z.object({
+  state: z.enum(["waiting", "streaming", "finished"]),
+  requestStartedAt: z.number(),
+  firstResponseAt: z.number().optional(),
+  lastResponseAt: z.number().optional(),
+  textChars: z.number().nonnegative(),
+  reasoningChars: z.number().nonnegative(),
+  finishReason: z.enum(["stop", "tool-calls", "max-tokens", "aborted", "error", "unknown", "incomplete"]).optional(),
+  usage: usageSchema.optional(),
+})
+export type CallProgress = z.infer<typeof callProgressSchema>
 export const callSchema = z.object({
   id,
   purpose: z.enum(["review", "compaction", "tool_followup"]).optional(),
@@ -345,6 +359,8 @@ export const callSchema = z.object({
   accounting: z.enum(["reserved", "reported", "uncertain", "not_sent"]),
   returnedModel: z.string().optional(),
   error: z.string().optional(),
+  errorCode: z.string().optional(),
+  progress: callProgressSchema.optional(),
   result: z.unknown().optional(),
   promptHash: z.string(),
 })
@@ -439,7 +455,8 @@ export const REVIEW_MODES = [
       tokenBudget: 3000000,
       maxCostCny: null,
       outputTokens: 8000,
-      callTimeoutSeconds: 120,
+      callTimeoutSeconds: 180,
+      callIdleTimeoutSeconds: 120,
       maxMcpCalls: MAX_MCP_CALLS,
     },
   },
@@ -455,7 +472,8 @@ export const REVIEW_MODES = [
       tokenBudget: 10000000,
       maxCostCny: null,
       outputTokens: 8000,
-      callTimeoutSeconds: 180,
+      callTimeoutSeconds: 300,
+      callIdleTimeoutSeconds: 180,
       maxMcpCalls: MAX_MCP_CALLS,
     },
   },
@@ -472,6 +490,7 @@ export const REVIEW_MODES = [
       maxCostCny: null,
       outputTokens: 10000,
       callTimeoutSeconds: 300,
+      callIdleTimeoutSeconds: 180,
       maxMcpCalls: MAX_MCP_CALLS,
     },
   },

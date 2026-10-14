@@ -10,6 +10,7 @@ import {
   spent,
 } from "./budget.js"
 import { mcpBlockedReason, mcpFailureKind } from "./mcp-status.js"
+import { CallWatchdog } from "./call-watchdog.js"
 import { GatewayError, type ModelGateway, type ModelResponse, type ContextDispatch } from "./gateway.js"
 import { getModel, type Model } from "./models.js"
 import { assignedIssues, makePrompt, parseResult, SYSTEM } from "./prompts.js"
@@ -26,6 +27,7 @@ import {
   revisionSchema,
   verificationSchema,
   type Call,
+  type CallProgress,
   type CreateInput,
   type Phase,
   type Run,
@@ -84,10 +86,12 @@ function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const abort = () => {
       reject(
-        new DecisionError(
-          "ABORTED",
-          "调用已停止或超时；保留预留额度等待对账。为避免重复计费，系统不会自动重试；请从检查点继续，已完成席位不会重复调用",
-        ),
+        signal.reason instanceof DecisionError
+          ? signal.reason
+          : new DecisionError(
+              "ABORTED",
+              "调用已停止或超时；保留预留额度等待对账。为避免重复计费，系统不会自动重试；请从检查点继续，已完成席位不会重复调用",
+            ),
       )
     }
     if (signal.aborted) {
@@ -616,10 +620,27 @@ export class DecisionEngine {
         activeElapsed(snapshot) -
         closingHold(snapshot, phase).durationMs,
     )
-    const signal = AbortSignal.any([
+    const watchdog = new CallWatchdog(
       controller.signal,
-      AbortSignal.timeout(Math.ceil(Math.min(remainingMs, snapshot.config.limits.callTimeoutSeconds * 1000))),
-    ])
+      Math.ceil(Math.min(remainingMs, snapshot.config.limits.callTimeoutSeconds * 1000)),
+      snapshot.config.limits.callIdleTimeoutSeconds === undefined
+        ? undefined
+        : snapshot.config.limits.callIdleTimeoutSeconds * 1000,
+    )
+    const signal = watchdog.signal
+    const progressByReceipt = new Map<string, CallProgress>()
+    const persistedAt = new Map<string, number>()
+    const saveProgress = async (receiptId: string, progress: CallProgress) => {
+      await this.store.update(
+        id,
+        run => {
+          const call = run.calls.find(item => item.id === receiptId)
+          if (call && call.epoch === epoch) call.progress = progress
+        },
+        undefined,
+        { preserveUpdatedAt: true },
+      )
+    }
     let response: ModelResponse | undefined
     try {
       response = await abortable(
@@ -629,6 +650,21 @@ export class DecisionEngine {
           prompt,
           maxOutputTokens: snapshot.config.limits.outputTokens,
           signal,
+          onProgress: async (progress, receiptId = callId) => {
+            if (signal.aborted) return
+            watchdog.activity(progress)
+            const previous = progressByReceipt.get(receiptId)
+            progressByReceipt.set(receiptId, progress)
+            if (
+              !previous ||
+              (!previous.firstResponseAt && progress.firstResponseAt) ||
+              progress.state === "finished" ||
+              Date.now() - (persistedAt.get(receiptId) ?? 0) >= 5000
+            ) {
+              persistedAt.set(receiptId, Date.now())
+              await saveProgress(receiptId, progress)
+            }
+          },
           context: {
             run: snapshot,
             callId,
@@ -658,6 +694,7 @@ export class DecisionEngine {
         }),
         signal,
       )
+      watchdog.dispose()
       const result = parseResult(response.text, this.store.get(id), phase, seatId)
       await this.store.update(id, run => {
         const call = run.calls.find(item => item.id === callId)!
@@ -687,14 +724,23 @@ export class DecisionEngine {
           "BUDGET_EXCEEDED",
         )
       }
-    } catch (error) {
-      const receipt = response ?? (error instanceof GatewayError ? error.response : undefined)
+    } catch (caught) {
+      watchdog.dispose()
+      const error = signal.aborted && signal.reason instanceof DecisionError ? signal.reason : caught
+      const receipt = response ?? (caught instanceof GatewayError ? caught.response : undefined)
+      for (const [receiptId, progress] of progressByReceipt)
+        await saveProgress(receiptId, {
+          ...progress,
+          state: "finished",
+          finishReason: progress.finishReason ?? (signal.aborted ? "aborted" : "incomplete"),
+        })
       await this.store.update(id, run => {
         const call = run.calls.find(item => item.id === callId)!
         settle(call, model, receipt?.usage)
         call.returnedModel = receipt?.returnedModel
         call.status = signal.aborted || run.epoch !== epoch ? "interrupted" : "failed"
         call.error = safeError(error)
+        call.errorCode = error instanceof DecisionError ? error.code : "UNKNOWN"
         if (call.dispatchState === "not_sent")
           event(run, "reservation_released", `${phase} · ${seatId} 尚未发送，已释放预留；失败尝试留档`)
         cancelActiveMcpCalls(run, call.error, callId)
@@ -711,7 +757,9 @@ export class DecisionEngine {
       }
       const attempts = failed.calls.filter(call => call.key === key).length
       if (
-        (retryableOutputError(error) || !(error instanceof GatewayError)) &&
+        retryableOutputError(error) &&
+        failed.calls.find(call => call.id === callId)?.accounting === "reported" &&
+        !signal.aborted &&
         !controller.signal.aborted &&
         failed.status === "running" &&
         failed.epoch === epoch &&
@@ -729,6 +777,14 @@ export class DecisionEngine {
       }
       if (
         canDeferSeatFailure(phase, error) &&
+        failed.calls.find(call => call.id === callId)?.accounting !== "uncertain" &&
+        !signal.aborted &&
+        !(
+          error instanceof DecisionError &&
+          ["ABORTED", "CALL_TIMEOUT", "CALL_IDLE_TIMEOUT", "TRUNCATED", "DSH_FINISH", "DSH_STREAM_ERROR"].includes(
+            error.code,
+          )
+        ) &&
         !controller.signal.aborted &&
         failed.status === "running" &&
         failed.epoch === epoch
@@ -739,6 +795,8 @@ export class DecisionEngine {
         return
       }
       await this.pauseForError(id, epoch, safeError(error), error instanceof DecisionError ? error.code : undefined)
+    } finally {
+      watchdog.dispose()
     }
   }
   private async authorizeDispatch(

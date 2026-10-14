@@ -3,7 +3,7 @@ import type { Model } from "./models.js"
 import type { ContentBlock, LlmRuntime, Message, ToolSchema } from "@deepseek-ai/dsh-llm"
 import { createMessage } from "@deepseek-ai/dsh-llm/message"
 import { acceptsReturnedModel } from "./model-identity.js"
-import { DecisionError, type ContextEstimate, type Phase, type Run, type Usage } from "./schema.js"
+import { DecisionError, type CallProgress, type ContextEstimate, type Phase, type Run, type Usage } from "./schema.js"
 
 export type WireMessage = { role: "user" | "assistant"; content: string }
 export type ContextDispatch = {
@@ -44,6 +44,7 @@ export type ModelRequest = {
   tools?: ToolSchema[]
   headers?: Record<string, string>
   context?: ReviewContext
+  onProgress?(progress: CallProgress, receiptId?: string): Promise<void>
 }
 export type ModelResponse = {
   text: string
@@ -131,6 +132,29 @@ export class HttpGateway implements ModelGateway {
     private fetcher: typeof fetch = fetch,
   ) {}
   async generate(request: ModelRequest): Promise<ModelResponse> {
+    const progress: CallProgress = { state: "waiting", requestStartedAt: Date.now(), textChars: 0, reasoningChars: 0 }
+    await request.onProgress?.({ ...progress })
+    try {
+      const response = await this.generateResponse(request)
+      progress.firstResponseAt = progress.lastResponseAt = Date.now()
+      progress.textChars = response.text.length
+      progress.usage = response.usage
+      progress.finishReason = response.finishReason === "tool_calls" ? "tool-calls" : "stop"
+      return response
+    } catch (error) {
+      progress.finishReason = request.signal.aborted
+        ? "aborted"
+        : error instanceof GatewayError && error.code === "TRUNCATED"
+          ? "max-tokens"
+          : "error"
+      if (error instanceof GatewayError) progress.usage = error.response?.usage
+      throw error
+    } finally {
+      progress.state = "finished"
+      await request.onProgress?.({ ...progress })
+    }
+  }
+  private async generateResponse(request: ModelRequest): Promise<ModelResponse> {
     const { model, system, prompt, maxOutputTokens, signal } = request
     const base = this.env[model.baseUrlEnv]?.trim()
     const key = this.env[model.apiKeyEnv]?.trim()
@@ -325,63 +349,102 @@ export class DshGateway implements ModelGateway {
               },
         ),
       )
-    for await (const raw of this.runtime.stream({
-      provider: request.model.provider ?? "",
-      model: request.model.model,
-      system: request.system,
-      messages,
-      tools: request.tools,
-      maxTokens: request.maxOutputTokens,
-      signal: request.signal,
-    })) {
-      const chunk = object(raw)
-      if (request.signal.aborted) {
-        throw new GatewayError("ABORTED", "宿主模型调用已停止", { text, usage })
-      }
-      if (chunk.type === "text-delta" && typeof chunk.text === "string") {
-        text += chunk.text
-      }
-      if (chunk.type === "block-end") {
-        const block = object(chunk.block)
-        if (
-          block.type === "tool-call" &&
-          typeof block.id === "string" &&
-          typeof block.name === "string" &&
-          typeof block.arguments === "string"
-        ) {
-          toolCalls.push({ id: block.id, name: block.name, arguments: block.arguments })
+    const progress: CallProgress = { state: "waiting", requestStartedAt: Date.now(), textChars: 0, reasoningChars: 0 }
+    await request.onProgress?.({ ...progress })
+    try {
+      for await (const raw of this.runtime.stream({
+        provider: request.model.provider ?? "",
+        model: request.model.model,
+        system: request.system,
+        messages,
+        tools: request.tools,
+        maxTokens: request.maxOutputTokens,
+        signal: request.signal,
+      })) {
+        const chunk = object(raw)
+        if (request.signal.aborted) {
+          throw new GatewayError("ABORTED", "宿主模型调用已停止", { text, usage })
         }
-      }
-      if (text.length + toolCalls.reduce((sum, call) => sum + call.arguments.length, 0) > 500000) {
-        throw new GatewayError("RESPONSE_LIMIT", "宿主模型响应超过大小上限", { text: "", usage })
-      }
-      if (chunk.type === "usage") {
-        const value = object(chunk.usage)
-        const input = count(value.inputTokens)
-        const output = count(value.outputTokens)
-        if (input !== undefined && output !== undefined) {
-          const allInput = input + (count(value.cacheReadTokens) ?? 0) + (count(value.cacheWriteTokens) ?? 0)
-          usage = { inputTokens: allInput, outputTokens: output, totalTokens: allInput + output }
+        progress.state = "streaming"
+        progress.firstResponseAt ??= Date.now()
+        progress.lastResponseAt = Date.now()
+        if (chunk.type === "text-delta" && typeof chunk.text === "string") {
+          text += chunk.text
+          progress.textChars += chunk.text.length
         }
-      }
-      if (chunk.type === "finish") {
-        const reason = object(chunk.reason)
-        if (reason.kind !== "stop" && reason.kind !== "tool-calls") {
-          throw new GatewayError("DSH_FINISH", "宿主模型未正常结束；请检查输出上限或模型连接", { text, usage })
+        if (chunk.type === "reasoning-delta" && typeof chunk.text === "string")
+          progress.reasoningChars += chunk.text.length
+        if (chunk.type === "block-end") {
+          const block = object(chunk.block)
+          if (
+            block.type === "tool-call" &&
+            typeof block.id === "string" &&
+            typeof block.name === "string" &&
+            typeof block.arguments === "string"
+          ) {
+            toolCalls.push({ id: block.id, name: block.name, arguments: block.arguments })
+          }
         }
-        finishReason = reason.kind === "tool-calls" ? "tool_calls" : "stop"
-        finished = true
+        if (text.length + toolCalls.reduce((sum, call) => sum + call.arguments.length, 0) > 500000) {
+          throw new GatewayError("RESPONSE_LIMIT", "宿主模型响应超过大小上限", { text: "", usage })
+        }
+        if (chunk.type === "usage") {
+          const value = object(chunk.usage)
+          const input = count(value.inputTokens)
+          const output = count(value.outputTokens)
+          if (input !== undefined && output !== undefined) {
+            const allInput = input + (count(value.cacheReadTokens) ?? 0) + (count(value.cacheWriteTokens) ?? 0)
+            usage = {
+              inputTokens: allInput,
+              outputTokens: output,
+              totalTokens: Math.max(allInput + output, count(value.totalTokens) ?? 0),
+              ...(count(value.reasoningTokens) === undefined ? {} : { reasoningTokens: count(value.reasoningTokens) }),
+            }
+            progress.usage = usage
+          }
+        }
+        if (chunk.type === "finish") {
+          const reason = object(chunk.reason)
+          progress.finishReason = ["stop", "tool-calls", "max-tokens", "aborted", "error"].includes(String(reason.kind))
+            ? (reason.kind as CallProgress["finishReason"])
+            : "unknown"
+          if (reason.kind !== "stop" && reason.kind !== "tool-calls") {
+            const code =
+              reason.kind === "max-tokens" ? "TRUNCATED" : reason.kind === "aborted" ? "ABORTED" : "DSH_FINISH"
+            const message =
+              reason.kind === "max-tokens"
+                ? `宿主报告达到输出上限 ${request.maxOutputTokens} Token${usage ? `（已报告输出 ${usage.outputTokens} Token）` : ""}；评审未完成，请调整额度或缩小范围后继续`
+                : reason.kind === "aborted"
+                  ? "宿主中断了模型调用；未自动重试，请核对用量后继续"
+                  : `宿主模型异常结束（${progress.finishReason}）；未自动重试，请检查提供方状态`
+            throw new GatewayError(code, message, { text, usage })
+          }
+          finishReason = reason.kind === "tool-calls" ? "tool_calls" : "stop"
+          finished = true
+        }
+        await request.onProgress?.({ ...progress })
       }
-    }
-    if (!finished || (!text.trim() && !toolCalls.length)) {
-      throw new GatewayError("DSH_EMPTY", "宿主模型未完成有效文本响应", { text, usage })
-    }
-    // The provider-neutral stream does not attest to the upstream response model.
-    return {
-      text,
-      usage,
-      ...(toolCalls.length ? { toolCalls } : {}),
-      finishReason: toolCalls.length ? "tool_calls" : finishReason,
+      if (!finished || (!text.trim() && !toolCalls.length)) {
+        throw new GatewayError("DSH_EMPTY", "宿主模型未完成有效文本响应", { text, usage })
+      }
+      // The provider-neutral stream does not attest to the upstream response model.
+      return {
+        text,
+        usage,
+        ...(toolCalls.length ? { toolCalls } : {}),
+        finishReason: toolCalls.length ? "tool_calls" : finishReason,
+      }
+    } catch (error) {
+      if (error instanceof DecisionError) throw error
+      throw new GatewayError(
+        request.signal.aborted ? "ABORTED" : "DSH_STREAM_ERROR",
+        request.signal.aborted ? "宿主模型调用已停止" : "宿主模型流连接异常；未自动重试，底层错误已隐藏",
+        { text, usage },
+      )
+    } finally {
+      progress.state = "finished"
+      progress.finishReason ??= request.signal.aborted ? "aborted" : "incomplete"
+      await request.onProgress?.({ ...progress })
     }
   }
 }

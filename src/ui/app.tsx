@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react"
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react"
 import { activeElapsed, budgetBlocked, spent } from "../core/budget.js"
 import { assessDeliberation } from "../core/deliberation.js"
+import { accountingLabel, progressSummary } from "../core/call-display.js"
 import type { Model } from "../core/models.js"
+import { PERSPECTIVES, perspectiveLabel, perspectiveValue } from "../core/perspectives.js"
 import {
   DEFAULT_LIMITS,
   DEFAULT_SEATS,
@@ -117,7 +119,12 @@ export function BriefForm({
     const mode = REVIEW_MODES.find(mode => mode.id === initialMode)!
     return {
       ...initialConfig,
-      limits: { ...initialConfig.limits, maxRounds: mode.limits.maxRounds, maxCalls: mode.limits.maxCalls, maxCostCny: null },
+      limits: {
+        ...initialConfig.limits,
+        maxRounds: mode.limits.maxRounds,
+        maxCalls: mode.limits.maxCalls,
+        maxCostCny: null,
+      },
     }
   })
   const [reviewModeId, setReviewModeId] = useState(initialMode)
@@ -129,9 +136,13 @@ export function BriefForm({
         template.seats.every((seat, index) => seat.id === initialConfig.seats[index]?.id),
     )?.id ?? "custom",
   )
+  const previousDraft = useRef({ brief, config })
   useEffect(() => {
+    // Mounting/restoring a sidebar is not a user edit and must not recreate a cleared composer.
+    if (composeOnly && previousDraft.current.brief === brief && previousDraft.current.config === config) return
+    previousDraft.current = { brief, config }
     onDraftChange?.(brief, config)
-  }, [brief, config, onDraftChange])
+  }, [brief, config, composeOnly, onDraftChange])
   const [feedback, setFeedback] = useState("")
   const [tab, setTab] = useState("brief")
   const [busy, setBusy] = useState(false)
@@ -177,7 +188,7 @@ export function BriefForm({
     ["delivery", "交付视角"],
     ["risk", "风险视角"],
     ["challenge", "独立反方"],
-  ].filter(([key]) => !perspectives.has(key as NonNullable<(typeof config.seats)[number]["perspective"]>))
+  ].filter(([key]) => !perspectives.has(key))
   const selectedFamilies = new Set(
     config.seats.map(seat => models.find(model => model.key === seat.modelKey)?.family ?? seat.modelKey),
   )
@@ -395,6 +406,25 @@ export function BriefForm({
                 "已自定义席位。模板不会限制后续编辑。"}
             </p>
           </div>
+          <h3>主持与复核</h3>
+          <div className="form-grid">
+            <ModelSelect
+              label="主持与编辑模型"
+              models={models}
+              value={config.moderatorKey}
+              onChange={moderatorKey => setConfig(value => ({ ...value, moderatorKey }))}
+            />
+            <ModelSelect
+              label="独立复核模型"
+              models={models}
+              value={config.verifierKey}
+              onChange={verifierKey => setConfig(value => ({ ...value, verifierKey }))}
+            />
+          </div>
+          <p className="hint">
+            主持与编辑负责整理议题、解读各方意见并生成修订稿；独立复核负责检查修订结果。这里的选择与 DSH
+            主聊天模型分别设置。
+          </p>
           <details className="advanced-members" open={templateId === "custom"}>
             <summary>高级设置 · 自定义席位</summary>
             <div className="role-grid">
@@ -432,26 +462,32 @@ export function BriefForm({
                   </label>
                   <label className="field">
                     <span>评审视角</span>
-                    <select
-                      value={seat.perspective ?? "domain"}
+                    <input
+                      value={perspectiveLabel(seat.perspective ?? "")}
+                      list={`perspectives-${seat.id}`}
+                      maxLength={120}
+                      placeholder="选择预设或输入自定义视角"
                       onChange={event => {
                         setTemplateId("custom")
                         setConfig({
                           ...config,
                           seats: config.seats.map(item =>
                             item.id === seat.id
-                              ? { ...item, perspective: event.target.value as NonNullable<typeof item.perspective> }
+                              ? {
+                                  ...item,
+                                  perspective: event.target.value ? perspectiveValue(event.target.value) : undefined,
+                                }
                               : item,
                           ),
                         })
                       }}
-                    >
-                      <option value="business">商业/用户价值</option>
-                      <option value="delivery">产品与交付</option>
-                      <option value="risk">财务/风险/合规</option>
-                      <option value="challenge">独立反方</option>
-                      <option value="domain">领域专家</option>
-                    </select>
+                    />
+                    <datalist id={`perspectives-${seat.id}`}>
+                      {PERSPECTIVES.map(item => (
+                        <option key={item.id} value={item.label} />
+                      ))}
+                    </datalist>
+                    <span className="hint">可自由填写，例如“无障碍体验”或“供应链韧性”；具体要求写在下方职责中。</span>
                   </label>
                   <ModelSelect
                     label="评审模型"
@@ -490,7 +526,8 @@ export function BriefForm({
           </details>
           {missingPerspectives.length > 0 && (
             <div className="notice error">
-              缺少{missingPerspectives.map(([, label]) => label).join("、")}。可以继续编辑，但不建议启动高风险评审。
+              未使用预设{missingPerspectives.map(([, label]) => label).join("、")}
+              ，请确认自定义视角或职责已覆盖这些方面。
             </div>
           )}
           {selectedFamilies.size < 2 && (
@@ -526,7 +563,8 @@ export function BriefForm({
                   <span>MCP 调用：最多 {limits.maxMcpCalls.toLocaleString()} 次</span>
                   <span>并发：最多 {limits.concurrency} 次</span>
                   <span>单次输出：最多 {limits.outputTokens.toLocaleString()} Token</span>
-                  <span>单次超时：{limits.callTimeoutSeconds} 秒</span>
+                  <span>单次总耗时：最多 {limits.callTimeoutSeconds} 秒</span>
+                  <span>无流数据超时：{limits.callIdleTimeoutSeconds} 秒</span>
                 </button>
               )
             })}
@@ -535,6 +573,35 @@ export function BriefForm({
             {REVIEW_MODES.find(mode => mode.id === reviewModeId)?.description}
             观点收敛时可提前完成；达到任一时间、调用次数或 Token 预算边界会停止派发。
           </p>
+          <details>
+            <summary>模型调用额度与超时</summary>
+            <p className="hint">思考流和正文流都会刷新无响应计时；单次总耗时仍是硬上限。调整仅应用于本次新建配置。</p>
+            {(
+              [
+                ["outputTokens", "单次输出上限（Token）", 512, 16000],
+                ["callTimeoutSeconds", "单次总耗时上限（秒）", 5, 300],
+                ["callIdleTimeoutSeconds", "无流数据超时（秒，留空则仅限制总耗时）", 5, 300],
+              ] as const
+            ).map(([key, label, min, max]) => (
+              <label className="field" key={key}>
+                <span>{label}</span>
+                <input
+                  type="number"
+                  min={min}
+                  max={max}
+                  step={1}
+                  value={config.limits[key] ?? ""}
+                  onChange={event => {
+                    const limits = { ...config.limits }
+                    if (key === "callIdleTimeoutSeconds" && event.target.value === "")
+                      delete limits.callIdleTimeoutSeconds
+                    else limits[key] = Number(event.target.value)
+                    setConfig({ ...config, limits })
+                  }}
+                />
+              </label>
+            ))}
+          </details>
           <div className="form-footer">
             <button type="button" className="secondary" onClick={() => setTab("brief")}>
               ← 返回材料
@@ -1268,6 +1335,10 @@ export function App({ scope, sidebar = false }: { scope: Scope; sidebar?: boolea
                                 </span>
                               </div>
                               <ResultContent call={call} />
+                              <div className="receipt">
+                                {accountingLabel(call.accounting)}：{call.accountedTokens.toLocaleString()} Token
+                              </div>
+                              {call.progress && <div className="receipt">{progressSummary(call.progress)}</div>}
                               {call.returnedModel && (
                                 <div className="receipt">
                                   网关返回：{call.returnedModel}

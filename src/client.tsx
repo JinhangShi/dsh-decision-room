@@ -15,6 +15,7 @@ import { DecisionChatMessage } from "./decision-chat-message.js"
 import { fillDecisionDraft, type ComposerInput } from "./composer.js"
 import { createSidebarAutoOpen } from "./sidebar-reveal.js"
 import { createProgressControl } from "./progress-control.js"
+import { createDraftSync, editableDecisionSession } from "./draft-sync.js"
 
 export const inject = ["slots", "sessions", "workspaces", "uiWorkspace", "uiConversation"] as const
 const PREFIX = "session-dsh-decision-room-"
@@ -203,16 +204,35 @@ function DecisionSidebar({
     },
   )
   const workspace = workspaceFor(context, sessionId, workspacePath)
-  const key = `decision-room:generated:${JSON.stringify([workspace.path, sessionId])}`
-  const generated = useRef("")
+  const [formEpoch, setFormEpoch] = useState(0)
+  const nextFormEpoch = useRef(0)
+  const isVisible = useRef(visible)
+  isVisible.current = visible
+  const sync = useRef<ReturnType<typeof createDraftSync>>()
+  const readyFrame = useRef<() => void>()
   useEffect(() => {
-    try {
-      generated.current = sessionStorage.getItem(key) ?? ""
-    } catch {
-      generated.current = ""
+    const initialize = () => {
+      if (!sync.current) {
+        sync.current = createDraftSync({
+          input: inputFor(context, sessionId),
+          scope: { sessionId, workspaceId: workspace.path! },
+          storage: {
+            getItem: key => sessionStorage.getItem(key),
+            setItem: (key, value) => sessionStorage.setItem(key, value),
+            removeItem: key => sessionStorage.removeItem(key),
+          },
+          editable: () => editableDecisionSession(session?.getSnapshot()),
+          resetFrame: () => setFormEpoch(++nextFormEpoch.current),
+        })
+      }
+      return sync.current
     }
-  }, [key])
-  useEffect(() => {
+    readyFrame.current = () => initialize().frameReady()
+    try {
+      initialize().reconcile()
+    } catch {
+      /* The input may mount after the sidebar. */
+    }
     const receive = (event: MessageEvent) => {
       if (
         event.origin !== location.origin ||
@@ -231,31 +251,38 @@ function DecisionSidebar({
           location.origin,
         )
       try {
-        if (!visible || currentSessionId(context.sessions.list.getSnapshot()) !== sessionId) {
+        if (!isVisible.current || currentSessionId(context.sessions.list.getSnapshot()) !== sessionId) {
           throw new Error("请回到此会话的决策卡片继续编辑")
         }
-        if (!blank) {
+        if (!session?.getSnapshot().blank) {
           throw new Error("材料已经发送，请在主聊天补充意见或发起二次修订")
         }
-        fillDecisionDraft(inputFor(context, sessionId), event.data.text, generated.current)
-        generated.current = event.data.text
-        try {
-          sessionStorage.setItem(key, generated.current)
-        } catch {
-          // Synchronization still works if browser storage is unavailable.
-        }
+        if (!initialize().compose(event.data.text)) return
         reply("decision-room:composed")
       } catch (cause) {
         reply("decision-room:compose-error", cause instanceof Error ? cause.message : "无法同步主聊天")
       }
     }
     window.addEventListener("message", receive)
-    return () => window.removeEventListener("message", receive)
-  }, [sessionId, context, blank, key, visible])
+    return () => {
+      window.removeEventListener("message", receive)
+      sync.current?.dispose()
+      sync.current = undefined
+      readyFrame.current = undefined
+    }
+  }, [sessionId, context, workspace.path, session])
   return (
     <iframe
-      key={`${sessionId}:${blank}`}
+      key={`${sessionId}:${blank}:${formEpoch}`}
       ref={frame}
+      onLoad={() => {
+        if (formEpoch !== nextFormEpoch.current) return
+        try {
+          readyFrame.current?.()
+        } catch {
+          /* A later edit retries when the native input is ready. */
+        }
+      }}
       title={blank ? "决策室议题与材料" : "决策室只读进度"}
       src={`/decision-room/?${new URLSearchParams({ sessionId, workspaceId: workspace.path!, layout: blank ? "sidebar" : "progress" })}`}
       style={{ width: "100%", height: "100%", border: 0, display: "block" }}
