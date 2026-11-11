@@ -11,9 +11,11 @@ const dshHome = resolve(process.env.DSH_HOME ?? join(homedir(), ".dsh"))
 const profile = join(dshHome, "profiles", "web")
 const manifestPath = join(profile, "package.json")
 const launcher = join(prefix, "bin", "dsh")
-const archive = join(repository, "dist", "dsh-decision-room-0.10.6.tgz")
-const disabled = ["dsh-pre-duediligence", "qcc-dsh-mcp-oauth"]
-const target = "0.2.0-rc.2"
+const release = JSON.parse(await readFile(join(repository, "package.json"), "utf8"))
+const target = release.engines.dsh
+const sidebar = release.devDependencies["dsh-better-sidebar"]
+const archiveName = `dsh-decision-room-${release.version}.tgz`
+const archive = join(repository, "dist", archiveName)
 const env = { ...process.env, DSH_HOME: dshHome }
 const quote = text => `'${text.replaceAll("'", "'\\''")}'`
 const run = (command, args, capture = false) => {
@@ -25,20 +27,29 @@ const run = (command, args, capture = false) => {
 let backup
 try {
   process.umask(0o077)
+  if (process.argv.slice(2).some(arg => arg !== "--plan")) throw new Error("只支持可选参数 --plan")
+  const [major, minor] = process.versions.node.split(".").map(Number)
+  if (major < 24 || (major === 24 && minor < 9)) throw new Error("请先安装 Node.js 24.9.0 或以上版本")
+  if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(target)) throw new Error("升级脚本要求精确的 DSH 目标版本")
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"))
   if (!Array.isArray(manifest.dsh?.profile?.bundles)) throw new Error("Web Profile 缺少 bundles 配置，停止升级")
+  const desiredBundles = [...new Set([...manifest.dsh.profile.bundles, "dsh-better-sidebar", "dsh-decision-room"])]
   const previous = run(launcher, ["--version"], true)
   const packaged = JSON.parse(run("tar", ["-xOf", archive, "package/package.json"], true))
-  if (packaged.name !== "dsh-decision-room" || packaged.version !== "0.10.6" || packaged.engines?.dsh !== target) {
+  if (
+    packaged.name !== "dsh-decision-room" ||
+    packaged.version !== release.version ||
+    packaged.engines?.dsh !== target
+  ) {
     throw new Error("本地安装包与目标版本不一致，请重新构建并打包")
   }
-  console.log(`DSH ${previous} → ${target}；Better Sidebar → 0.26.0；MCP Connector → 0.2.70；决策室 → 0.10.6`)
-  console.log(`安装目录：${prefix}\nProfile：${profile}\n停用但保留安装和数据：${disabled.join("、")}`)
+  console.log(`DSH ${previous} → ${target}；Better Sidebar → ${sidebar}；决策室 → ${release.version}`)
+  console.log(`安装目录：${prefix}\nProfile：${profile}\n保留其他插件的版本及启用状态`)
   if (process.argv.includes("--plan")) process.exit(0)
-  if (process.argv.slice(2).length) throw new Error("只支持可选参数 --plan")
   const listener = spawnSync("lsof", ["-nP", "-iTCP:3080", "-sTCP:LISTEN"], { encoding: "utf8" })
   if (listener.error) throw listener.error
   if (listener.status === 0) throw new Error("3080 端口仍在监听。请先完整退出 DSH Web，再执行升级")
+  if (listener.status !== 1) throw new Error("无法检查 DSH Web 监听状态，停止升级")
   // Refuse non-default-port Web processes too; never stop an active review automatically.
   const processes = run("ps", ["-axo", "command="], true).split("\n")
   if (processes.some(line => /(?:\/dsh(?:\/lib\/bin\.js)?|\/bin\.js)\s+(?:web\b|--profile\s+web\b)/.test(line))) {
@@ -46,8 +57,12 @@ try {
   }
   run("pnpm", ["--version"], true)
   await mkdir(join(dshHome, "backups"), { recursive: true, mode: 0o700 })
-  backup = await mkdtemp(join(dshHome, "backups", "upgrade-0.2.0-rc.2-"))
+  backup = await mkdtemp(join(dshHome, "backups", `upgrade-${target}-`))
   await chmod(backup, 0o700)
+  // Keep upgrades independent of stale or root-owned files in the user's npm cache.
+  const npmCache = resolve(process.env.DSH_UPGRADE_NPM_CACHE ?? join(backup, "npm-cache"))
+  await mkdir(npmCache, { recursive: true, mode: 0o700 })
+  env.npm_config_cache = npmCache
   const snapshot = join(backup, "dsh-home.tgz")
   console.log(`备份配置、插件、凭据及会话到私有目录：${backup}`)
   run("tar", ["--exclude=./backups", "--exclude=./logs", "-czf", snapshot, "-C", dshHome, "."])
@@ -55,7 +70,7 @@ try {
     join(backup, "RESTORE.txt"),
     [
       "恢复前完整退出 DSH。恢复会覆盖备份中同名的配置和记录；升级后新产生的记录请先另行保存。",
-      `npm install --global --prefix ${quote(prefix)} ${quote(`@deepseek-ai/dsh@${previous}`)}`,
+      `npm --cache ${quote(npmCache)} install --global --prefix ${quote(prefix)} ${quote(`@deepseek-ai/dsh@${previous}`)}`,
       `tar -xzf ${quote(snapshot)} -C ${quote(dshHome)}`,
       `DSH_HOME=${quote(dshHome)} ${quote(launcher)} --version`,
       "",
@@ -63,47 +78,48 @@ try {
     { mode: 0o600 },
   )
   // A unique archive path avoids reusing cached contents when rebuilding the same local version.
-  const installArchive = join(backup, "dsh-decision-room-0.10.6.tgz")
+  const installArchive = join(backup, archiveName)
   await copyFile(archive, installArchive)
-  run("npm", ["install", "--global", "--prefix", prefix, "--no-audit", "--no-fund", `@deepseek-ai/dsh@${target}`])
+  run("npm", [
+    "--cache",
+    npmCache,
+    "install",
+    "--global",
+    "--prefix",
+    prefix,
+    "--no-audit",
+    "--no-fund",
+    `@deepseek-ai/dsh@${target}`,
+  ])
   if (run(launcher, ["--version"], true) !== target) throw new Error("安装后的 DSH 版本不符合预期")
-  const disableBundles = async () => {
+  const preserveBundles = async () => {
     const current = JSON.parse(await readFile(manifestPath, "utf8"))
-    current.dsh.profile.bundles = current.dsh.profile.bundles.filter(name => !disabled.includes(name))
+    current.dsh.profile.bundles = desiredBundles
     const temporary = `${manifestPath}.decision-room-upgrade-${process.pid}.tmp`
     await writeFile(temporary, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 })
     await rename(temporary, manifestPath)
   }
-  await disableBundles()
   if (manifest.dependencies?.["dsh-decision-room"]) {
     run(launcher, ["plugin", "--profile", "web", "remove", "dsh-decision-room"])
   }
-  run(launcher, [
-    "plugin",
-    "--profile",
-    "web",
-    "add",
-    "dsh-better-sidebar@0.26.0",
-    "dsh-mcp-connector@0.2.70",
-    installArchive,
-  ])
-  await disableBundles()
+  run(launcher, ["plugin", "--profile", "web", "add", `dsh-better-sidebar@${sidebar}`, installArchive])
+  await preserveBundles()
   for (const [name, version] of [
-    ["dsh-better-sidebar", "0.26.0"],
-    ["dsh-mcp-connector", "0.2.70"],
-    ["dsh-decision-room", "0.10.6"],
+    ["dsh-better-sidebar", sidebar],
+    ["dsh-decision-room", release.version],
   ]) {
     const installed = JSON.parse(await readFile(join(profile, "node_modules", name, "package.json"), "utf8"))
     if (installed.version !== version) throw new Error(`${name} 安装后的版本不符合预期`)
   }
-  for (const entry of ["lib/client.js", "lib/index.js"]) {
+  for (const entry of ["lib/client.js", "lib/index.js", "lib/web/app.js", "lib/web/app.css", "lib/web/index.html"]) {
     const expected = run("tar", ["-xOf", installArchive, `package/${entry}`], true)
     const actual = await readFile(join(profile, "node_modules", "dsh-decision-room", entry), "utf8")
     if (actual.trim() !== expected) throw new Error(`安装后的 ${entry} 与本地包不一致`)
   }
-  run(process.execPath, [join(repository, "lib", "migrate-history.js"), "--root", join(dshHome, "sessions"), "--apply"])
   console.log(`升级安装完成。备份与恢复说明：${backup}`)
-  console.log(`启动：DSH_HOME=${quote(dshHome)} ${quote(launcher)} web --host 127.0.0.1 --port 3080 --no-open`)
+  console.log(
+    `启动：DSH_HOME=${quote(dshHome)} ${quote(launcher)} --profile web --host 127.0.0.1 --port 3080 --no-open`,
+  )
   console.log("把 DSH 启动日志中带 token 的完整本地链接复制到 Safari，点击左侧“决策室”测试。")
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))

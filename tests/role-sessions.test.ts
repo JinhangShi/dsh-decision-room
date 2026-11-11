@@ -5,13 +5,16 @@ import { Context } from "@deepseek-ai/cordis"
 import SessionStore, { Session, SessionId, SESSION_FORMAT_VERSION } from "@deepseek-ai/dsh-session"
 import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence"
 import SessionProjectionRegistry from "@deepseek-ai/dsh-session-projection"
-import JsonlSessionPersistence from "@deepseek-ai/dsh-session-persistence-jsonl"
+import * as JsonlSessionPersistence from "@deepseek-ai/dsh-session-persistence-jsonl"
 import SessionQueryEngine from "@deepseek-ai/dsh-session-query"
 import SubagentRuntime, { foldSubagentDescriptor } from "@deepseek-ai/dsh-subagent"
+import LocalFileSystem from "@deepseek-ai/dsh-fs-local"
+import SystemPrompt from "@deepseek-ai/dsh-system-prompt"
+import WorkingDirectoryService from "@deepseek-ai/dsh-working-directory"
 import { describe, expect, it, vi } from "vitest"
 import { DemoGateway } from "../src/core/demo-gateway.js"
 import { repairRoleSessionCatalog } from "../src/dsh/role-sessions.js"
-import { complete, setup, until } from "./fixtures.js"
+import { complete, input, setup, until } from "./fixtures.js"
 import { nativeRuntime } from "./native-runtime.js"
 
 /** Real query reads/projections; these tests do not need a full-text search backend. */
@@ -24,6 +27,9 @@ class CatalogQuery extends SessionQueryEngine {
   }
 }
 async function mountCatalog(ctx: Context) {
+  if (!ctx.get("systemPrompt")) ctx.plugin(SystemPrompt, {})
+  ctx.plugin(LocalFileSystem, {})
+  ctx.plugin(WorkingDirectoryService, {})
   ctx.plugin(CatalogQuery)
   ctx.plugin(SubagentRuntime, {})
   await until(() => Boolean(ctx.get("sessionQuery") && ctx.get("subagents")))
@@ -98,7 +104,14 @@ describe("DSH 0.2 角色会话目录登记与修复", () => {
         expect.objectContaining({ id, mode: "one-shot", label: expect.stringContaining("历史会话") }),
       ])
       const parentBefore = await inspect(ctx.sessionPersistence, parentId)
-      expect(await repairRoleSessionCatalog(ctx, [ledger], () => {})).toEqual({ repaired: 0, skipped: 1, failed: 0 })
+      const createSession = vi.spyOn(Session, "create")
+      try {
+        expect(await repairRoleSessionCatalog(ctx, [ledger], () => {})).toEqual({ repaired: 0, skipped: 1, failed: 0 })
+        // A no-op cold restart must not snapshot the complete parent once per recorded role.
+        expect(createSession).not.toHaveBeenCalled()
+      } finally {
+        createSession.mockRestore()
+      }
       expect(await inspect(ctx.sessionPersistence, parentId)).toEqual(parentBefore)
       expect(engine.store.get(run.id)).toEqual(run)
     } finally {
@@ -110,28 +123,34 @@ describe("DSH 0.2 角色会话目录登记与修复", () => {
 
   it("真实 AgentLoop 在派发前持久化子描述符和父目录，全部尝试保留为一次性历史", async () => {
     const demo = new DemoGateway(0)
-    const runtime = await nativeRuntime({
-      async generate(request) {
-        const call = request.context!
-        const id = SessionId(`session-dr-${call.run.id}-${call.seatId}-${call.callId}`)
-        const persisted = await inspect(runtime.ctx.sessionPersistence, id)
-        expect(foldSubagentDescriptor(persisted.events)).toMatchObject({
-          mode: "one-shot",
-          provider: "dsh-decision-room",
-        })
-        expect(persisted.meta.isSeeded).toBe(false)
-        expect(persisted.inheritedEventCount).toBe(0)
-        const parent = await inspect(runtime.ctx.sessionPersistence, SessionId(call.run.scope.sessionId))
-        expect(parent.events.some(event => event.type === "subagent/catalog" && event.data.childId === id)).toBe(true)
-        expect(JSON.stringify(request.messages)).not.toContain("subagent/descriptor")
-        return demo.generate(request)
+    const workspaceId = tmpdir()
+    const runtime = await nativeRuntime(
+      {
+        async generate(request) {
+          const call = request.context!
+          const id = SessionId(`session-dr-${call.run.id}-${call.seatId}-${call.callId}`)
+          const persisted = await inspect(runtime.ctx.sessionPersistence, id)
+          expect(foldSubagentDescriptor(persisted.events)).toMatchObject({
+            mode: "one-shot",
+            provider: "dsh-decision-room",
+          })
+          expect(persisted.meta.isSeeded).toBe(false)
+          expect(persisted.inheritedEventCount).toBe(0)
+          const parent = await inspect(runtime.ctx.sessionPersistence, SessionId(call.run.scope.sessionId))
+          expect(parent.events.some(event => event.type === "subagent/catalog" && event.data.childId === id)).toBe(true)
+          expect(JSON.stringify(request.messages)).not.toContain("subagent/descriptor")
+          return demo.generate(request)
+        },
       },
-    })
+      [],
+      undefined,
+      workspaceId,
+    )
     const { engine } = await setup(runtime.gateway)
     try {
       await mountCatalog(runtime.ctx)
-      const run = await complete(engine)
-      expect(run.status).toBe("completed")
+      const run = await complete(engine, input({ scope: { sessionId: "session-test", workspaceId } }))
+      expect(run.status, run.stopReason).toBe("completed")
       const rows = await runtime.ctx.subagents.listChildren(SessionId(run.scope.sessionId))
       expect(rows).toHaveLength(run.calls.length)
       expect(rows.every(row => row.mode === "one-shot" && row.label?.includes("V1"))).toBe(true)

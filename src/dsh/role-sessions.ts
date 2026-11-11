@@ -2,7 +2,7 @@ import { Session, SessionSeq, type SessionHeader, type SessionStore } from "@dee
 import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence"
 import {
   foldSubagentDescriptor,
-  snapshotSubagentDescriptor,
+  SUBAGENT_DESCRIPTOR_VERSION,
   type OneShotSubagentDescriptorData,
 } from "@deepseek-ai/dsh-subagent"
 import type { Call, Run } from "../core/schema.js"
@@ -18,15 +18,20 @@ const phases = {
 }
 
 /** A role attempt is readable history, never a separately continuable budget owner. */
-export function roleDescriptor(run: Run, call: Pick<Call, "seatId" | "phase" | "round">, sharedHistory = false) {
+export function roleDescriptor(
+  run: Run,
+  call: Pick<Call, "seatId" | "phase" | "round">,
+  sharedHistory = false,
+): OneShotSubagentDescriptorData {
   const role =
     run.config.seats.find(seat => seat.id === call.seatId)?.name ??
     (call.seatId === "verifier" ? "独立复核" : "主持与编辑")
-  return snapshotSubagentDescriptor({
+  return {
+    version: SUBAGENT_DESCRIPTOR_VERSION,
     mode: "one-shot",
     provider: "dsh-decision-room",
     label: `V${run.version} · ${role} · ${sharedHistory ? "历史会话" : `${phases[call.phase]}${call.round ? ` · 第 ${call.round} 轮` : ""}`}`,
-  })
+  }
 }
 
 type CatalogServices = {
@@ -134,6 +139,9 @@ async function registerRoleCatalogNow(
   }
   await using handle = await services.sessionPersistence.open(parentId, "write")
   const { events } = await handle.read()
+  if (handle.header.cwd !== child.cwd) throw new Error("角色与父会话工作空间不一致")
+  // Most startup repairs are already catalogued. Avoid snapshotting the entire parent for every child.
+  if (events.some(event => event.type === "subagent/catalog" && event.data.childId === child.id)) return false
   const parent = Session.create(parentId, events, handle.header, handle.inheritedEventCount)
   if (append(parent)) {
     await handle.append(parent.snapshotEvents().slice(events.length))

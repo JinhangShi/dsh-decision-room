@@ -12,6 +12,35 @@ import { complete, input } from "./fixtures.js"
 import { largeCatalog, nativeRuntime } from "./native-runtime.js"
 
 describe("真实 DSH 大工具目录回归", () => {
+  it("每步只读取宿主已准入的 MCP，条件变化后重新读取目录", async () => {
+    const demo = new DemoGateway(0)
+    let enabled = false
+    const discussionTools: string[][] = []
+    const native = await nativeRuntime({
+      async generate(request) {
+        if (request.context!.phase === "discuss") {
+          discussionTools.push(request.tools!.map(tool => tool.name))
+          enabled = true
+        } else {
+          expect(request.tools).toEqual([])
+        }
+        return demo.generate(request)
+      },
+    })
+    const tool = largeCatalog()[0]!
+    native.ctx.tools.register(tool, { when: () => enabled })
+    const engine = new DecisionEngine(new RunStore(new MemoryPersistence()), DEFAULT_MODELS, native.gateway, "demo")
+    try {
+      await engine.initialize()
+      expect((await complete(engine)).status).toBe("completed")
+      expect(discussionTools[0]).toEqual([])
+      expect(discussionTools.slice(1).some(names => names.includes(tool.name))).toBe(true)
+    } finally {
+      await engine.dispose()
+      await native.dispose()
+    }
+  })
+
   it("151 个大工具经过真实流水线仍完成评审，最终发送过滤迟到的技能注入", async () => {
     const demo = new DemoGateway(0)
     const requests: ModelRequest[] = []

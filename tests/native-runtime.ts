@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import SessionProjectionRegistry from "@deepseek-ai/dsh-session-projection"
-import JsonlSessionPersistence from "@deepseek-ai/dsh-session-persistence-jsonl"
+import * as JsonlSessionPersistence from "@deepseek-ai/dsh-session-persistence-jsonl"
 import { SessionId } from "@deepseek-ai/dsh-session"
 import { Context } from "@deepseek-ai/cordis"
 import AgentRegistry from "@deepseek-ai/dsh-agent"
@@ -11,6 +11,7 @@ import SessionStore from "@deepseek-ai/dsh-session"
 import { LlmRuntime, type UserMessage } from "@deepseek-ai/dsh-llm"
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt"
 import ToolRuntime, { type ToolDefinition } from "@deepseek-ai/dsh-tools"
+import * as NativeToolExecutor from "@deepseek-ai/dsh-tool-executor-native"
 import TokenMeter from "@deepseek-ai/dsh-token-meter"
 import { NativeGateway, type NativeServices } from "../src/dsh/native-gateway.js"
 import { DEFAULT_MODELS } from "../src/core/models.js"
@@ -18,7 +19,26 @@ import type { ModelGateway } from "../src/core/gateway.js"
 import { until } from "./fixtures.js"
 
 /** Real Cordis waterfalls, AgentLoop, tool execution, session replay and LLM routing. Only the upstream is fake. */
-export async function nativeRuntime(http: ModelGateway, definitions: ToolDefinition[] = [], models = DEFAULT_MODELS) {
+export async function nativeRuntime(
+  http: ModelGateway,
+  definitions: ToolDefinition[] = [],
+  models = DEFAULT_MODELS,
+  workspaceId = "/workspace/test",
+) {
+  const host = await nativeHost(definitions, workspaceId)
+  const gateway = new NativeGateway(host.services, models, http)
+  return {
+    ...host,
+    gateway,
+    async dispose() {
+      await gateway.dispose()
+      await host.dispose()
+    },
+  }
+}
+
+/** Shared real Host services, also used to mount the complete decision-room plugin. */
+export async function nativeHost(definitions: ToolDefinition[] = [], workspaceId = "/workspace/test") {
   const root = await mkdtemp(join(tmpdir(), "decision-native-"))
   const ctx = new Context()
   ctx.plugin(SystemPrompt, {})
@@ -29,6 +49,7 @@ export async function nativeRuntime(http: ModelGateway, definitions: ToolDefinit
   ctx.plugin(AgentRegistry)
   ctx.plugin(TokenMeter, {})
   ctx.plugin(ToolRuntime, {})
+  ctx.plugin(NativeToolExecutor)
   ctx.plugin(AgentLoop, { agents: [] })
   await until(() => Boolean(ctx.get("agentLoop") && ctx.get("sessionPersistence")))
   definitions.forEach(tool => ctx.tools.register(tool))
@@ -53,15 +74,13 @@ export async function nativeRuntime(http: ModelGateway, definitions: ToolDefinit
       },
     },
   } satisfies NativeServices
-  const gateway = new NativeGateway(services, models, http)
-  const parent = await ctx.agents.create({ sessionId: SessionId("session-test"), meta: { cwd: "/workspace/test" } })
+  const parent = await ctx.agents.create({ sessionId: SessionId("session-test"), meta: { cwd: workspaceId } })
   return {
     root,
     parent,
     ctx,
-    gateway,
+    services,
     async dispose() {
-      await gateway.dispose()
       await parent.dispose()
       await ctx.fiber.dispose()
       await rm(root, { recursive: true, force: true })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-decision-room",
-  "version": "0.10.6",
+  "version": "0.10.8",
   "description": "DSH 多模型决策室：独立评审、持续质询、证据与分歧、方案修订及人工续议",
   "private": false,
   "author": "Jinhang Shi",
@@ -76,12 +76,12 @@
     }
   },
   "engines": {
-    "node": "^22.19.0 || ^24.0.0",
-    "dsh": "0.2.0-rc.2"
+    "node": ">=24.9.0",
+    "dsh": "0.2.2-rc.1"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-subagent": "0.2.0-rc.2",
-    "dsh-better-sidebar": ">=0.26.0 <0.27.0",
+    "@deepseek-ai/dsh-subagent": "0.2.2-rc.1",
+    "dsh-better-sidebar": ">=0.30.1 <0.31.0",
     "react": ">=18",
     "react-dom": ">=18"
   },
@@ -97,45 +97,50 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-format": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-format-catalog": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-format-v0-to-v1": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-format-v3-to-v4": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-format": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-format-catalog": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-format-v0-to-v1": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-format-v3-to-v4": "0.2.2-rc.1",
     "zod": "4.5.4"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.4",
-    "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-agent-loop": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-api-session-controller": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-api-workspace-controller": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-locale": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-ui-chat": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-ui-conversation": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-ui-session": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-ui-settings": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-ui-workspace": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-scope": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-persistence": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-query": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-settings": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-subagent": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-token-meter": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-user-approval": "0.2.0-rc.2",
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/cordis-plugin-group": "1.1.0",
+    "@deepseek-ai/cordis-plugin-include": "1.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent-loop": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-api-workspace-controller": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-locale": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-chat": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-session": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-workspace": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-fs-local": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-scope": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-persistence": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-projection": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-query": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-settings": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-subagent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-token-meter": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tool-executor-native": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-user-approval": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-working-directory": "0.2.2-rc.1",
     "@types/node": "22.20.1",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "dsh-better-sidebar": "0.26.0",
+    "dsh-better-sidebar": "0.30.1",
     "esbuild": "0.25.12",
     "playwright": "1.51.1",
     "prettier": "3.8.3",
@@ -146,16 +151,16 @@
   },
   "pnpm": {
     "packageExtensions": {
-      "@deepseek-ai/dsh-client-ui-primitives@0.2.0-rc.2": {
+      "@deepseek-ai/dsh-client-ui-primitives@0.2.2-rc.1": {
         "dependencies": {
-          "@deepseek-ai/dsh-client-store": "0.2.0-rc.2",
-          "@deepseek-ai/dsh-util-code-language": "0.2.0-rc.2",
-          "@deepseek-ai/dsh-util-workspace-path": "0.2.0-rc.2",
-          "@shikijs/langs": "^4.3.1",
+          "@deepseek-ai/dsh-client-store": "0.2.2-rc.1",
+          "@deepseek-ai/dsh-util-code-language": "0.2.2-rc.1",
+          "@deepseek-ai/dsh-util-workspace-path": "0.2.2-rc.1",
+          "@shikijs/langs": "^4.4.3",
           "anser": "^2.3.5",
           "clsx": "^2.0.0",
           "diff": "^9.0.0",
-          "katex": "^0.16.47",
+          "katex": "^0.18.7",
           "mdast-util-from-markdown": "^2.0.3",
           "mdast-util-gfm": "^3.1.0",
           "mdast-util-math": "^3.0.0",
@@ -167,13 +172,15 @@
           "micromark-util-classify-character": "^2.0.1",
           "micromark-util-sanitize-uri": "^2.0.1",
           "micromark-util-symbol": "^2.0.1",
-          "shiki": "^4.3.1",
-          "simple-icons": "16.31.0"
+          "shiki": "^4.4.3",
+          "simple-icons": "16.31.0",
+          "@deepseek-ai/dsh-util-file-drag": "0.2.2-rc.1",
+          "micromark-util-decode-string": "^2.0.1"
         }
       },
-      "@deepseek-ai/dsh-client-store@0.2.0-rc.2": {
+      "@deepseek-ai/dsh-client-store@0.2.2-rc.1": {
         "dependencies": {
-          "zustand": "~4.4.7",
+          "zustand": "~4.5.7",
           "immer": "^10.1.1"
         }
       }

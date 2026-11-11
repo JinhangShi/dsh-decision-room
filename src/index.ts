@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { z } from "zod"
+import { jsonSchema } from "./core/json-schema.js"
 import { DecisionEngine, publicRun } from "./core/engine.js"
 import { DshGateway } from "./core/gateway.js"
 import {
@@ -39,8 +40,10 @@ export const inject = [
   "systemPrompt",
 ] as const
 const DECISION_SESSION_EVENT_TYPES = ["decision-room/message", "decision-room/progress"] as const
+const STATUS_NOTICE =
+  "status 仅代表返回时的检查点。启动或恢复已受理不代表模型已经收到请求；后续状态以执行卡片为准，可能立即暂停。请说明请求已受理，不要承诺仍在运行或自动完成；用户查询时用 decision_room_status 核对，不要频繁轮询。"
 
-/** DSH 0.2.0-rc.2 exposes its event catalog as readonly but has not added a downstream registration API yet. */
+/** DSH 0.2.2-rc.1 exposes its event catalog as readonly without a downstream registration API. */
 export function registerDecisionSessionEvents(catalog: ReadonlySet<string>): void {
   const mutable = catalog as Set<string>
   if (typeof mutable.add !== "function") {
@@ -217,7 +220,7 @@ export function apply(ctx: HostContext, config: Config = {}): void {
       name: "decision_room_prepare",
       description:
         "仅在用户要求暂存时登记当前会话的决策草稿，不启动模型。用户明确要求开始评审时直接使用 decision_room_start。禁止用猜测补全硬约束。",
-      parameters: z.toJSONSchema(briefSchema),
+      parameters: jsonSchema(briefSchema),
       output,
       async execute(args, execution) {
         const { engine, refreshModels } = await ready
@@ -276,19 +279,21 @@ export function apply(ctx: HostContext, config: Config = {}): void {
       name: "decision_room_start",
       description:
         "用户在主聊天明确要求开始后，按其方案、角色与预算启动真实多模型评审，进度和结果自动发布到本聊天。缺少配置时使用已展示的默认值，不得猜测扩大预算。重复工具调用按同一用户消息去重。",
-      parameters: z.toJSONSchema(startReviewSchema),
+      parameters: jsonSchema(startReviewSchema),
       output,
       async execute(args, execution) {
-        const { chat, refreshModels } = await ready
+        const { chat, engine, transcript, refreshModels } = await ready
         await refreshModels()
-        const run = await chat.start(executionScope(execution), args, executionMessageId(execution))
+        const started = await chat.start(executionScope(execution), args, executionMessageId(execution))
+        await transcript?.idle()
+        const run = engine.store.get(started.id)
         return {
           id: run.id,
           status: run.status,
           version: run.version,
           config: run.config,
-          message:
-            "任务状态以 status 为准。执行卡片和角色消息会持续在本聊天更新；用户可直接在本聊天提出暂停、补充或修订要求。不要频繁轮询。",
+          stopReason: run.stopReason,
+          message: STATUS_NOTICE,
         }
       },
     })
@@ -296,20 +301,20 @@ export function apply(ctx: HostContext, config: Config = {}): void {
       name: "decision_room_continue",
       description:
         "依据本聊天用户的新反馈创建下一版；明确要求重新评审时 start=true，只暂存意见时 start=false。默认继承已完成修订稿和原预算，原版本不改写。运行中先按用户指令暂停。",
-      parameters: z.toJSONSchema(continueReviewSchema),
+      parameters: jsonSchema(continueReviewSchema),
       output,
       async execute(args, execution) {
-        const { chat, refreshModels } = await ready
+        const { chat, engine, transcript, refreshModels } = await ready
         await refreshModels()
-        const run = await chat.continue(executionScope(execution), args, executionMessageId(execution))
+        const created = await chat.continue(executionScope(execution), args, executionMessageId(execution))
+        await transcript?.idle()
+        const run = engine.store.get(created.id)
         return {
           id: run.id,
           version: run.version,
           status: run.status,
-          message:
-            run.status === "running"
-              ? "下一版已在原预算边界内开始，过程显示在本聊天。"
-              : "下一版状态：" + run.status + "。继续在本聊天操作，无需打开侧栏。",
+          stopReason: run.stopReason,
+          message: STATUS_NOTICE,
         }
       },
     })
@@ -319,7 +324,7 @@ export function apply(ctx: HostContext, config: Config = {}): void {
     const control = register({
       name: "decision_room_control",
       description: "根据本聊天用户的明确指令开始草稿、暂停、继续、取消，或提前结束讨论进入修订；不改变原预算。",
-      parameters: z.toJSONSchema(controlSchema),
+      parameters: jsonSchema(controlSchema),
       output,
       async execute(args, execution) {
         const input = controlSchema.parse(args)
@@ -328,9 +333,16 @@ export function apply(ctx: HostContext, config: Config = {}): void {
         const scope = executionScope(execution)
         const run = engine.store.get(input.id)
         assertScope(run, scope)
-        const updated = await engine.control(run.id, scope, input.action, run.revision)
+        await engine.control(run.id, scope, input.action, run.revision)
         await transcript?.idle()
-        return { id: updated.id, status: updated.status, phase: updated.phase, stopReason: updated.stopReason }
+        const updated = engine.store.get(run.id)
+        return {
+          id: updated.id,
+          status: updated.status,
+          phase: updated.phase,
+          stopReason: updated.stopReason,
+          message: STATUS_NOTICE,
+        }
       },
     })
     const budgetSchema = z.object({ id: z.string().uuid(), limits: limitsSchema }).strict()
@@ -338,7 +350,7 @@ export function apply(ctx: HostContext, config: Config = {}): void {
       name: "decision_room_limits",
       description:
         "仅在用户明确要求调整额度后修改草稿或暂停任务的限制；未提及的字段必须保留原值，不得为完成任务自行加预算。",
-      parameters: z.toJSONSchema(budgetSchema),
+      parameters: jsonSchema(budgetSchema),
       output,
       async execute(args, execution) {
         const input = budgetSchema.parse(args)
@@ -360,7 +372,7 @@ export function apply(ctx: HostContext, config: Config = {}): void {
     const decide = register({
       name: "decision_room_decide",
       description: "记录用户在本聊天明确作出的采纳、不采纳或暂缓及其理由。不能替用户决策，保留模型异议。",
-      parameters: z.toJSONSchema(decideSchema),
+      parameters: jsonSchema(decideSchema),
       output,
       async execute(args, execution) {
         const input = decideSchema.parse(args)

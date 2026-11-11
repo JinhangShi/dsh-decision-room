@@ -117,7 +117,7 @@ class DecisionAdapter extends LlmAdapter {
       inputModalities: ["text" as const],
     }
   }
-  override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  override stream(options: GenerateOptions<string>): AsyncIterable<StreamChunk> {
     return this.owner.stream(options)
   }
 }
@@ -307,22 +307,18 @@ export class NativeGateway implements ModelGateway {
           const decision = await next()
           return decision.kind === "enter" ? { ...decision, messages: reviewMessages(decision.messages) } : decision
         })
-        scoped.on("system-prompt/assemble", async (_assembly, _context, next) => {
+        scoped.on("system-prompt/assemble", async (_assembly, assemblyContext, next) => {
           const result = await next()
           result.contexts = []
           const active = this.active.get(id)
           if (active) {
-            active.catalog = mcpToolsForPhase(result.tools, active.request.context?.phase)
-            const prompt = [
-              {
-                id: "estimate" as Message["id"],
-                role: "user" as const,
-                source: { kind: "dsh-decision-room" as const },
-                content: [{ type: "text" as const, text: request.prompt }],
-              },
-            ]
-            result.tools = this.selectedTools(active, system, prompt, request.maxOutputTokens)
-          } else result.tools = []
+            // DSH 0.2.2 keeps tools outside the presentation waterfall. Read only
+            // this step's admitted definitions; stream() selects and budgets the final schemas.
+            active.catalog =
+              active.request.context?.phase === "discuss"
+                ? mcpToolsForPhase(scoped.tools.schemas(assemblyContext.scope, assemblyContext.toolSet), "discuss")
+                : []
+          }
           return result
         })
         // Register isolation before the preset so its pre-step additions are inside our filter.
@@ -468,6 +464,13 @@ export class NativeGateway implements ModelGateway {
       if (request.signal.aborted) {
         throw new DecisionError("ABORTED", "DSH 评审已停止，保留原始会话记录")
       }
+      const ended = agent.session.snapshotEvents().findLast(event => event.type === "turn/end")
+      if (ended?.data.reason.kind === "error") {
+        throw new DecisionError(
+          "NATIVE_TURN_ERROR",
+          `DSH 角色执行失败：${ended.data.reason.error.message.slice(0, 2000)}`,
+        )
+      }
       if (!state.response) {
         throw new DecisionError("NATIVE_RESPONSE", "DSH 角色未完成评审，请查看会话与预算状态")
       }
@@ -480,7 +483,7 @@ export class NativeGateway implements ModelGateway {
       await handle?.dispose()
     }
   }
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(options: GenerateOptions<string>): AsyncIterable<StreamChunk> {
     const state = options.sessionId ? this.active.get(options.sessionId) : undefined
     if (!state || !state.request.context || options.purpose === "session-title") {
       throw new DecisionError("AUTHORIZATION", "决策室模型只能在已授权的评审任务预算内调用")

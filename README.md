@@ -8,7 +8,7 @@
 
 ## 安装
 
-当前版本为 **0.10.6**，包含草稿同步修复、自定义评审视角、模型超时与重试修复，以及主持／复核模型选择。兼容 **DSH `0.2.0-rc.2` + Better Sidebar `0.26.0`**。安装方法见下文“安装到现有 DSH”。此前的 `0.9.15` 安装包面向旧版宿主；不要将 `0.10.x` 安装到旧宿主。从旧版迁移需运行下述历史日志迁移，单纯更换插件不会转换旧日志。
+当前版本为 **0.10.8**，适配 **DSH `0.2.2-rc.1` + Better Sidebar `0.30.1`**，修复工具参数定义导致角色在请求前退出的问题；保留草稿同步、自定义评审视角、模型超时与重试，以及主持／复核模型选择。安装命令见下文。`0.10.0`–`0.10.6` 要求 DSH `0.2.0-rc.2`，不能用于 `0.2.2-rc.1`；`0.9.15` 面向更早的宿主。从旧版迁移需运行下述历史日志迁移，单纯更换插件不会转换旧日志。
 
 ## 当前功能
 
@@ -48,7 +48,7 @@ Host 表决快照与主持解读使用独立消息 ID：先发布不可变快照
 
 ## 本地开发预览
 
-要求 Node.js 22.19+ 或 24、pnpm 10。
+要求 Node.js 24.9.0 以上、pnpm 10，与目标 DSH 的 Node.js 要求一致。
 
 ```sh
 pnpm install --frozen-lockfile
@@ -57,7 +57,7 @@ pnpm dev:demo
 
 打开 `http://127.0.0.1:4318/decision-room/`。演示模式明确标注“无外部调用”，使用确定性合成结果。
 
-`package.json` 中的 `pnpm.packageExtensions` 仅为 DSH `0.2.0-rc.2` 的 UI primitives 和 client-store 补齐发布包遗漏的运行依赖，版本依据该发行版源码，用于本地渲染和测试。插件浏览器包仍使用宿主提供的原生组件。
+`package.json` 中的 `pnpm.packageExtensions` 仅为 DSH `0.2.2-rc.1` 的 UI primitives 和 client-store 补齐发布包遗漏的运行依赖，版本依据该发行版包清单，用于本地渲染和测试。插件浏览器包仍使用宿主提供的原生组件。
 
 真实模型模式只复用你已有的凭据。创建不提交 Git 的 `.env.local`：
 
@@ -83,24 +83,37 @@ pnpm dev
 
 ## 安装到现有 DSH
 
-完整停止目标 DSH Profile 后，从 npm 安装指定版本：
+出现 `dsh-decision-room@0.10.2` 与 DSH `0.2.2-rc.1` 不兼容的提示，是旧包的 `engines.dsh` 精确版本限制触发。`0.10.6` 仍要求旧宿主，重装它不能解决；请安装 `0.10.8`。
+
+目标宿主为 [DSH `0.2.2-rc.1`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.1)，右侧配置卡片需要 Better Sidebar `0.30.1`。DSH 依赖固定为同一 RC 版本，避免各组件的 npm `latest` 标签指向不同版本。当前版本不兼容旧宿主或旧版 Better Sidebar。
+
+完整停止目标 DSH Profile，备份其配置和会话数据，确认 `dsh --version` 为 `0.2.2-rc.1` 后执行（示例为 `web` Profile）：
 
 ```sh
-dsh plugin --profile web add dsh-better-sidebar@0.26.0 dsh-decision-room@0.10.6
+dsh plugin --profile web remove dsh-decision-room
+dsh plugin --profile web add dsh-better-sidebar@0.30.1 dsh-decision-room@0.10.8
 ```
 
-目标宿主为 [DSH `0.2.0-rc.2`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.0-rc.2)，右侧配置卡片需要 Better Sidebar `0.26.0`。DSH 依赖固定为同一 RC 版本，避免各组件的 npm `latest` 标签指向不同版本。当前版本使用新版会话导航、聊天节点、工具消息和持久化接口，不兼容 DSH `0.1.x` 或旧版 Better Sidebar。
+首次安装时跳过 `remove`。安装后按原方式启动 DSH。
 
-当前本机从旧 Web Profile 升级，可在本机终端执行专用脚本（默认 CLI 在 `~/.local`，Profile 在 `~/.dsh/profiles/web`）：
+也可以从本仓库构建，再将上面命令中的 `dsh-decision-room@0.10.8` 替换为 `./dist/dsh-decision-room-0.10.8.tgz`：
 
 ```sh
-node scripts/upgrade-local-dsh.mjs --plan  # 只查看升级内容
-node scripts/upgrade-local-dsh.mjs         # 先完整退出 DSH，再升级
+pnpm install --frozen-lockfile
+pnpm build
+pnpm pack --pack-destination dist
 ```
 
-脚本先将 DSH Home 备份到其私有 `backups/` 目录，并生成恢复命令；然后安装 DSH `0.2.0-rc.2`、Better Sidebar `0.26.0`、MCP Connector `0.2.70` 和本地决策室 `0.10.6` 包。按本次选定的迁移方案，从活动 bundles 中移除旧 `dsh-pre-duediligence` 和 `qcc-dsh-mcp-oauth`，保留安装及数据。脚本使用独立安装包路径，重新安装决策室并检查版本和入口内容，再迁移旧决策室日志；中途失败时停止并给出备份位置，不自动恢复或启动模型。它需要本机终端对安装目录的写入权限。
+本机已有 Web Profile，且 CLI 安装在 `~/.local` 时，也可以用脚本一起升级宿主并安装本地包：
 
-升级后按脚本输出启动 Web，将 DSH 日志中带 token 的完整本地链接复制到 Safari。普通根地址可能要求认证；不要分享带 token 的链接。
+```sh
+node scripts/upgrade-local-dsh.mjs --plan  # 检查安装包并预览版本
+node scripts/upgrade-local-dsh.mjs         # 先完整退出 DSH，再执行
+```
+
+脚本先检查 Node.js、安装包及 DSH 停机状态，再把 DSH Home 备份到私有 `backups/` 目录并生成恢复说明。随后安装 DSH `0.2.2-rc.1`、Better Sidebar `0.30.1` 和本地决策室 `0.10.8`，核对安装后的版本及网页资源，最后输出启动命令。npm 使用备份目录中的独立缓存，避免原有 `~/.npm` 缓存权限异常导致安装失败；可用 `DSH_UPGRADE_NPM_CACHE` 指定其他可写缓存目录。其他插件的版本和启用状态保留，历史日志不自动转换。脚本需要终端对 `~/.local` 和 `~/.dsh` 的写入权限；自定义路径可设置 `DSH_UPGRADE_PREFIX` 和 `DSH_HOME`。
+
+启动 Web 后，将 DSH 日志中带 token 的完整本地链接复制到浏览器。普通根地址可能要求认证；不要分享带 token 的链接。
 
 如果已升级宿主却遇到 `unknown historical event type "decision-room/progress"`，在本仓库构建后执行以下命令。默认仅预览；应用前须完整退出 DSH，`--root` 可指定其他 Profile 使用的会话根目录，`--session <id>` 可限制到一条主会话及直接子会话：
 
@@ -112,19 +125,6 @@ pnpm migrate:history --apply
 迁移先备份并核对来源哈希，再生成 `session.v4.jsonl[.zstd]`；原始 v0 日志保留。决策室消息和进度载荷保持不变，常规事件及序号引用由 DSH 官方迁移器转换；仅将本插件的一次性角色描述符升级到新版，并补齐父目录。遇到未知事件、未支持的描述符扩展、来源变化或已有目标文件会停止，不覆盖已有记录。重复执行会跳过已迁移的会话，不重新派发评审。迁移备份中的 `migration.json` 记录源文件及新文件哈希；若需回退，应先停机并核对新版日志是否已有后续写入，不能直接删除使用中的日志。
 
 主聊天按消息 ID 恢复多个评审版本。安装插件不会自动升级宿主或其他插件；请先确认目标 Profile 的版本组合。
-
-也可以从本仓库构建并安装本地包：
-
-```sh
-pnpm build
-pnpm pack --pack-destination dist
-```
-
-完整停止你准备安装的 DSH Profile，然后执行：
-
-```sh
-dsh plugin --profile web add ./dist/dsh-decision-room-0.10.6.tgz
-```
 
 按原方式启动 DSH。先在 DSH「设置 → 模型」配置提供方、凭据、模型 ID 和上下文容量；决策室读取宿主模型目录，不读取插件自己的环境密钥：
 

@@ -781,9 +781,15 @@ export class DecisionEngine {
         !signal.aborted &&
         !(
           error instanceof DecisionError &&
-          ["ABORTED", "CALL_TIMEOUT", "CALL_IDLE_TIMEOUT", "TRUNCATED", "DSH_FINISH", "DSH_STREAM_ERROR"].includes(
-            error.code,
-          )
+          [
+            "ABORTED",
+            "CALL_TIMEOUT",
+            "CALL_IDLE_TIMEOUT",
+            "TRUNCATED",
+            "DSH_FINISH",
+            "DSH_STREAM_ERROR",
+            "NATIVE_TURN_ERROR",
+          ].includes(error.code)
         ) &&
         !controller.signal.aborted &&
         failed.status === "running" &&

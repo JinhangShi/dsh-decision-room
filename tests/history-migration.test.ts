@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { zstdCompressSync } from "node:zlib"
 import { Context } from "@deepseek-ai/cordis"
 import SessionStore, { SessionId } from "@deepseek-ai/dsh-session"
-import JsonlSessionPersistence from "@deepseek-ai/dsh-session-persistence-jsonl"
+import * as JsonlSessionPersistence from "@deepseek-ai/dsh-session-persistence-jsonl"
 import { describe, expect, it } from "vitest"
 import { decisionHistoryChildFact, migrateDecisionHistory } from "../src/dsh/history-migration.js"
 import {

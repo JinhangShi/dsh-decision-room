@@ -39,7 +39,14 @@ function harness(http: ModelGateway, compact = false) {
         const handlers = new Map<string, unknown>()
         let system = ""
         const ctx = {
-          tools: { guard: () => {}, register: () => {} },
+          tools: {
+            guard: () => {},
+            register: () => {},
+            schemas: () => [
+              { name: "shell", description: "unavailable", parameters: {} },
+              { name: "mcp__registry__lookup", description: "read material", parameters: { type: "object" } },
+            ],
+          },
           systemPrompt: {
             section: (section: { text: string }) => {
               system = section.text
@@ -53,7 +60,10 @@ function harness(http: ModelGateway, compact = false) {
         const agent = {
           id: options.sessionId,
           status: "idle",
-          session: { header: { id: options.sessionId, createdAt: Date.now(), ...options.meta } },
+          session: {
+            header: { id: options.sessionId, createdAt: Date.now(), ...options.meta },
+            snapshotEvents: () => [],
+          },
           cancel: () => {},
           followup(message: UserMessage) {
             row.messages.push(message)
@@ -80,7 +90,7 @@ function harness(http: ModelGateway, compact = false) {
               ],
             }))
             expect(assembly.contexts).toEqual([])
-            const request: GenerateOptions = {
+            const request: GenerateOptions<string> = {
               provider: "dsh-decision-room",
               model: options.agentOptions!.model!,
               sessionId: options.sessionId,
